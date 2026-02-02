@@ -1,141 +1,118 @@
-# Pipe Labs MCP Server
+# Vig v1 — Prediction Market Bot
 
-Connect Claude to your Pipe Labs trading platform for natural language trading operations.
+Automated prediction market bot that exploits the favorite-longshot bias on Polymarket. Buys heavy favorites near expiry, grinds consistent small profits at high volume.
 
-## What You Can Say to Claude
-
-Once connected, you can use natural language commands like:
-
-- **"Start market making on BitMart for SHARP/USDT with 0.5% spread"**
-- **"Generate $50k volume on KuCoin over 24 hours"**
-- **"Stop all bots for client John"**
-- **"Show P&L for all active strategies"**
-- **"List all clients"**
-- **"Get portfolio for client ABC"**
-- **"Show me the orderbook for BTC/USDT on BitMart"**
-
-## Installation
-
-### 1. Install Dependencies
+## Quick Start
 
 ```bash
-cd pipelabs-mcp
+# 1. Clone and install
+cd vig
 pip install -r requirements.txt
+
+# 2. Configure
+cp .env.example .env
+# Edit .env — PAPER_MODE=true for testing
+
+# 3. Run paper trading
+python main.py
 ```
 
-### 2. Get Your Admin Token
+## How It Works
 
-1. Log into your Pipe Labs dashboard as admin
-2. Open browser DevTools (F12) → Console
-3. Run: `localStorage.getItem('pipelabs_token')`
-4. Copy the token
+Every 60 minutes:
 
-### 3. Configure Claude Desktop
+1. **Scan** — Query Polymarket Gamma API for markets expiring within 60 min
+2. **Filter** — Find favorites priced $0.70 - $0.90 with sufficient volume
+3. **Bet** — Place limit buy orders on qualifying favorites
+4. **Settle** — Wait for market resolution, record results
+5. **Snowball** — Reinvest 50% of profit (growth) or pocket 100% (harvest)
+6. **Repeat**
 
-Edit your Claude Desktop config file:
+## Strategy
 
-**macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-**Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+| Parameter | Value |
+|-----------|-------|
+| Side | Whichever side priced $0.70 - $0.90 |
+| Starting clip | $10 per bet |
+| Max clip | $100 per bet |
+| Bets per window | Up to 15 |
+| Growth | Reinvest 50%, pocket 50% |
+| Harvest | Once at $100 max, pocket 100% |
+| Target win rate | >85% |
+| Kill switch | <80% over 200 bets |
 
-Add this configuration:
+## Architecture
 
-```json
-{
-  "mcpServers": {
-    "pipelabs-trading": {
-      "command": "python",
-      "args": ["/full/path/to/pipelabs-mcp/server.py"],
-      "env": {
-        "PIPELABS_BACKEND_URL": "https://pipelabs-dashboard-production.up.railway.app",
-        "PIPELABS_ADMIN_TOKEN": "your-jwt-token-here"
-      }
-    }
-  }
-}
+```
+vig/
+├── main.py           # Main loop — scan → bet → settle → snowball
+├── config.py         # Configuration and env vars
+├── scanner.py        # Gamma API market discovery + filtering
+├── bet_manager.py    # Order placement (paper + live via py-clob-client)
+├── snowball.py       # Clip size management and growth/harvest logic
+├── risk_manager.py   # Circuit breaker
+├── db.py             # SQLite storage
+├── notifier.py       # Telegram alerts
+├── requirements.txt
+└── .env.example
 ```
 
-### 4. Restart Claude Desktop
+## Modes
 
-Close and reopen Claude Desktop. You should see the MCP tools available.
+### Paper Trading (default)
+```bash
+PAPER_MODE=true python main.py
+```
+Scans real Polymarket markets, simulates bets with realistic win probability (price + 5% edge). No wallet needed.
 
-## Available Tools
+### Live Trading
+```bash
+PAPER_MODE=false python main.py
+```
+Requires funded Polygon wallet with USDC on Polymarket.
 
-### Client Management
-- `list_clients` - List all clients
-- `get_client` - Get client details
-- `create_client` - Create new client
+## Configuration
 
-### Exchange Connections
-- `list_client_exchanges` - View connected exchanges
-- `add_exchange_connection` - Add API keys
+All strategy params in `config.py`:
 
-### Trading Bots
-- `start_market_making` - Start market making bot
-- `start_volume_generation` - Start volume generation
-- `stop_bot` - Stop specific bot
-- `stop_all_bots` - Stop all bots for client
-- `list_active_bots` - List running bots
+- `min_favorite_price` / `max_favorite_price` — Price range for favorites (0.70 - 0.90)
+- `expiry_window_minutes` — How close to expiry (60 min)
+- `max_bets_per_window` — Max simultaneous bets (15)
+- `starting_clip` / `max_clip` — Bet sizes ($10 → $100)
+- `snowball_reinvest_pct` — Profit reinvestment rate (50%)
+- `max_volume_pct` — Max bet as % of market volume (2%)
 
-### Portfolio & P&L
-- `get_portfolio` - Get balances
-- `get_pnl` - Get profit/loss
-- `get_trade_history` - View trade history
+## Circuit Breaker
 
-### Market Data
-- `get_market_data` - Get price/volume data
-- `get_orderbook` - Get orderbook
+Bot auto-stops if:
+- 5 consecutive losses
+- Win rate drops below 80% over last 100 bets
+- Daily loss exceeds 15% of bankroll
+- 4+ losses in a single window
 
-### Dashboard
-- `get_dashboard_overview` - Overall stats
-- `get_alerts` - View alerts
+## Telegram Notifications
 
-## Backend Requirements
+Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` for:
+- Window summaries (bets, W/L, profit, clip)
+- Circuit breaker alerts
+- Milestones (hit max clip, etc.)
+- Daily summaries
 
-For full functionality, your backend needs these endpoints:
+## Validation Plan
 
-### Already Implemented
-- `GET /api/admin/clients`
-- `GET /api/admin/clients/{id}`
-- `POST /api/admin/clients`
-- `GET /api/admin/clients/{id}/api-keys`
-- `POST /api/admin/clients/{id}/api-keys`
-- `GET /api/admin/overview`
+1. **Week 1**: Paper trade — collect 500+ simulated bets
+2. **Week 2-3**: Live with $10 clips — prove win rate >85%
+3. **Week 3-4**: Enable snowball — grow to $100 max
+4. **Month 2+**: Scale to $100 clips, target $20k+/month
 
-### Need to Add (for bot control)
-- `POST /api/agent/bots/start`
-- `POST /api/agent/bots/{id}/stop`
-- `POST /api/agent/clients/{id}/bots/stop-all`
-- `GET /api/agent/bots`
-- `GET /api/agent/clients/{id}/portfolio`
-- `GET /api/agent/pnl`
-- `GET /api/agent/trades`
-- `GET /api/agent/market/{exchange}/{pair}`
-- `GET /api/agent/orderbook/{exchange}/{pair}`
+## Key APIs
 
-## Hummingbot Integration
+| API | Purpose | Auth |
+|-----|---------|------|
+| Gamma (`gamma-api.polymarket.com`) | Market discovery, prices, metadata | None |
+| CLOB (`clob.polymarket.com`) | Order books, live prices, order placement | Private key |
+| py-clob-client (PyPI) | Python SDK for CLOB | — |
 
-To enable actual trading, connect to Hummingbot Gateway:
+## License
 
-1. Install Hummingbot Gateway
-2. Configure exchange connectors
-3. Update backend to proxy commands to Gateway
-
-See: https://docs.hummingbot.org/gateway/
-
-## Troubleshooting
-
-**MCP not connecting:**
-- Check the path in `claude_desktop_config.json`
-- Verify Python is in your PATH
-- Check token is valid
-
-**API errors:**
-- Verify backend is running: `curl https://your-backend.railway.app/health`
-- Check token hasn't expired
-- Look at backend logs in Railway
-
-## Security Notes
-
-- Never commit your admin token to git
-- Use environment variables for sensitive data
-- Consider token rotation for production
+MIT
