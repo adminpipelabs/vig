@@ -230,6 +230,60 @@ def api_scan():
     }
 
 
+
+
+@app.get("/api/history/bets")
+def api_history_bets(limit: int = 500, result: str = None, offset: int = 0):
+    conn = get_db()
+    c = conn.cursor()
+    if result and result in ("won", "lost", "pending"):
+        c.execute("SELECT * FROM bets WHERE result=? ORDER BY id DESC LIMIT ? OFFSET ?", (result, limit, offset))
+    else:
+        c.execute("SELECT * FROM bets ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset))
+    rows = [dict(r) for r in c.fetchall()]
+    c.execute("SELECT COUNT(*) as cnt FROM bets")
+    total = c.fetchone()["cnt"]
+    conn.close()
+    return {"bets": rows, "total": total}
+
+
+@app.get("/api/history/windows")
+def api_history_windows(limit: int = 500, offset: int = 0):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM windows ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset))
+    rows = [dict(r) for r in c.fetchall()]
+    c.execute("SELECT COUNT(*) as cnt FROM windows")
+    total = c.fetchone()["cnt"]
+    conn.close()
+    return {"windows": rows, "total": total}
+
+
+@app.get("/api/history/daily")
+def api_history_daily():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""
+        SELECT
+            DATE(placed_at) as date,
+            COUNT(*) as total_bets,
+            SUM(CASE WHEN result='won' THEN 1 ELSE 0 END) as wins,
+            SUM(CASE WHEN result='lost' THEN 1 ELSE 0 END) as losses,
+            COALESCE(SUM(profit), 0) as profit,
+            COALESCE(SUM(amount), 0) as deployed
+        FROM bets
+        WHERE result != 'pending'
+        GROUP BY DATE(placed_at)
+        ORDER BY DATE(placed_at) DESC
+    """)
+    rows = [dict(r) for r in c.fetchall()]
+    for r in rows:
+        resolved = (r["wins"] or 0) + (r["losses"] or 0)
+        r["win_rate"] = round((r["wins"] or 0) / resolved * 100, 1) if resolved > 0 else 0
+    conn.close()
+    return rows
+
+
 # ─── Dashboard HTML ────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
@@ -325,7 +379,7 @@ canvas { width:100%!important; height:100%!important; }
 <body>
 <div class="header">
   <div class="header-left">
-    <div class="logo">V<span>ig</span></div>
+    <a href="/" class="logo" style="text-decoration:none;color:var(--text)">V<span>ig</span></a><div style="display:flex;gap:8px"><a href="/" style="padding:4px 12px;border-radius:6px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:var(--cyan);text-decoration:none;border:1px solid rgba(24,255,255,0.3);background:rgba(24,255,255,0.12)">Dashboard</a><a href="/history" style="padding:4px 12px;border-radius:6px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-dim);text-decoration:none;border:1px solid transparent">History</a></div>
     <div class="status-badge offline" id="statusBadge"><div class="status-dot"></div><span id="statusText">Loading...</span></div>
   </div>
   <div class="header-right">
@@ -539,6 +593,252 @@ async function refresh(){
 }
 
 refresh();setInterval(refresh,15000);
+</script>
+</body>
+</html>"""
+
+
+
+@app.get("/history", response_class=HTMLResponse)
+def history_page():
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vig History</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0a0b0e; --surface: #12131a; --surface2: #1a1c25;
+  --border: #252833; --text: #e4e6ed; --text-dim: #6b7084;
+  --green: #00e676; --green-dim: rgba(0,230,118,0.12);
+  --red: #ff5252; --red-dim: rgba(255,82,82,0.12);
+  --amber: #ffd740; --amber-dim: rgba(255,215,64,0.12);
+  --blue: #448aff; --blue-dim: rgba(68,138,255,0.12);
+  --cyan: #18ffff; --cyan-dim: rgba(24,255,255,0.12);
+  --font-mono: 'JetBrains Mono', monospace;
+  --font-display: 'Space Grotesk', sans-serif;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:var(--bg); color:var(--text); font-family:var(--font-mono); font-size:13px; line-height:1.5; }
+.header { display:flex; align-items:center; justify-content:space-between; padding:16px 24px; border-bottom:1px solid var(--border); background:var(--surface); }
+.header-left { display:flex; align-items:center; gap:16px; }
+.logo { font-family:var(--font-display); font-size:22px; font-weight:700; letter-spacing:-0.5px; text-decoration:none; color:var(--text); }
+.logo span { color:var(--green); }
+.nav { display:flex; gap:8px; }
+.nav a { padding:6px 14px; border-radius:6px; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.5px; color:var(--text-dim); text-decoration:none; border:1px solid transparent; transition:all 0.15s; }
+.nav a:hover { color:var(--text); background:var(--surface2); }
+.nav a.active { color:var(--cyan); border-color:rgba(24,255,255,0.3); background:var(--cyan-dim); }
+.container { padding:20px 24px; max-width:1440px; margin:0 auto; }
+.tabs { display:flex; gap:4px; margin-bottom:16px; }
+.tab { padding:8px 16px; border-radius:6px; font-size:12px; font-weight:600; cursor:pointer; border:1px solid var(--border); background:var(--surface); color:var(--text-dim); transition:all 0.15s; }
+.tab:hover { color:var(--text); }
+.tab.active { color:var(--cyan); border-color:rgba(24,255,255,0.3); background:var(--cyan-dim); }
+.filters { display:flex; gap:8px; margin-bottom:16px; align-items:center; }
+.filter-btn { padding:4px 12px; border-radius:4px; font-size:11px; font-weight:500; cursor:pointer; border:1px solid var(--border); background:var(--surface2); color:var(--text-dim); font-family:var(--font-mono); transition:all 0.15s; }
+.filter-btn:hover { color:var(--text); }
+.filter-btn.active { color:var(--green); border-color:rgba(0,230,118,0.3); background:var(--green-dim); }
+.card { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:16px 20px; }
+.summary-row { display:flex; gap:24px; margin-bottom:16px; flex-wrap:wrap; }
+.summary-item { font-size:12px; }
+.summary-item b { color:var(--cyan); font-family:var(--font-display); font-size:16px; }
+.table-wrap { overflow-x:auto; max-height:calc(100vh - 280px); overflow-y:auto; }
+table { width:100%; border-collapse:collapse; font-size:12px; }
+th { text-align:left; padding:8px 12px; font-size:10px; text-transform:uppercase; letter-spacing:0.8px; color:var(--text-dim); font-weight:500; border-bottom:1px solid var(--border); white-space:nowrap; position:sticky; top:0; background:var(--surface); z-index:1; }
+td { padding:8px 12px; border-bottom:1px solid var(--border); white-space:nowrap; }
+tr:hover td { background:rgba(255,255,255,0.02); }
+.tag { display:inline-block; padding:2px 8px; border-radius:4px; font-size:10px; font-weight:600; text-transform:uppercase; }
+.tag.won { background:var(--green-dim); color:var(--green); }
+.tag.lost { background:var(--red-dim); color:var(--red); }
+.tag.pending { background:var(--blue-dim); color:var(--blue); }
+.tag.growth { background:var(--blue-dim); color:var(--blue); }
+.tag.harvest { background:var(--amber-dim); color:var(--amber); }
+.positive { color:var(--green); }
+.negative { color:var(--red); }
+.neutral { color:var(--text-dim); }
+.empty { text-align:center; padding:40px; color:var(--text-dim); }
+@media (max-width:600px) { .container{padding:12px;} .summary-row{gap:12px;} }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="header-left">
+    <a href="/" class="logo">V<span>ig</span></a>
+    <div class="nav">
+      <a href="/">Dashboard</a>
+      <a href="/history" class="active">History</a>
+    </div>
+  </div>
+</div>
+<div class="container">
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('bets')">Bets</div>
+    <div class="tab" onclick="switchTab('windows')">Windows</div>
+    <div class="tab" onclick="switchTab('daily')">Daily</div>
+  </div>
+
+  <div id="betsView">
+    <div class="filters">
+      <div class="filter-btn active" onclick="filterBets('all')">All</div>
+      <div class="filter-btn" onclick="filterBets('won')">Won</div>
+      <div class="filter-btn" onclick="filterBets('lost')">Lost</div>
+      <div class="filter-btn" onclick="filterBets('pending')">Pending</div>
+    </div>
+    <div class="summary-row" id="betsSummary"></div>
+    <div class="card"><div class="table-wrap" id="betsTable"><div class="empty">Loading...</div></div></div>
+  </div>
+
+  <div id="windowsView" hidden>
+    <div class="summary-row" id="windowsSummary"></div>
+    <div class="card"><div class="table-wrap" id="windowsTable"><div class="empty">Loading...</div></div></div>
+  </div>
+
+  <div id="dailyView" hidden>
+    <div class="card"><div class="table-wrap" id="dailyTable"><div class="empty">Loading...</div></div></div>
+  </div>
+</div>
+
+<script>
+let currentTab='bets';
+let currentFilter='all';
+
+async function fetchJSON(u){try{const r=await fetch(u);return await r.json()}catch(e){return null}}
+function fmt(n){if(n==null)return'--';return(n>=0?'+':'')+'$'+Math.abs(n).toFixed(2)}
+function fmtDate(iso){if(!iso)return'--';try{const d=new Date(iso);return d.toLocaleDateString('en-US',{month:'short',day:'numeric'})+' '+d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})}catch(e){return iso}}
+
+function switchTab(tab){
+  currentTab=tab;
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  event.target.classList.add('active');
+  document.getElementById('betsView').hidden=tab!=='bets';
+  document.getElementById('windowsView').hidden=tab!=='windows';
+  document.getElementById('dailyView').hidden=tab!=='daily';
+  loadData();
+}
+
+function filterBets(f){
+  currentFilter=f;
+  document.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('active'));
+  event.target.classList.add('active');
+  loadData();
+}
+
+async function loadData(){
+  if(currentTab==='bets'){
+    const url=currentFilter==='all'?'/api/history/bets?limit=500':'/api/history/bets?limit=500&result='+currentFilter;
+    const data=await fetchJSON(url);
+    if(!data||!data.bets||data.bets.length===0){
+      document.getElementById('betsTable').innerHTML='<div class="empty">No bets found</div>';
+      document.getElementById('betsSummary').innerHTML='';
+      return;
+    }
+    const bets=data.bets;
+    const wins=bets.filter(b=>b.result==='won').length;
+    const losses=bets.filter(b=>b.result==='lost').length;
+    const pend=bets.filter(b=>b.result==='pending').length;
+    const totalProfit=bets.reduce((s,b)=>s+(b.profit||0),0);
+    const totalDeployed=bets.reduce((s,b)=>s+(b.amount||0),0);
+
+    document.getElementById('betsSummary').innerHTML=
+      '<div class="summary-item">Total: <b>'+data.total+'</b></div>'+
+      '<div class="summary-item">Showing: <b>'+bets.length+'</b></div>'+
+      '<div class="summary-item">Wins: <b class="positive">'+wins+'</b></div>'+
+      '<div class="summary-item">Losses: <b class="negative">'+losses+'</b></div>'+
+      (pend?'<div class="summary-item">Pending: <b>'+pend+'</b></div>':'')+
+      '<div class="summary-item">Profit: <b class="'+(totalProfit>=0?'positive':'negative')+'">'+fmt(totalProfit)+'</b></div>'+
+      '<div class="summary-item">Deployed: <b>$'+totalDeployed.toFixed(0)+'</b></div>';
+
+    let h='<table><tr><th>#</th><th>Date</th><th>Market</th><th>Side</th><th>Price</th><th>Amount</th><th>Result</th><th>Payout</th><th>P&L</th><th>Window</th></tr>';
+    for(const b of bets){
+      const q=(b.market_question||'').substring(0,50)+((b.market_question||'').length>50?'...':'');
+      const pr=b.profit||0;
+      h+='<tr>';
+      h+='<td>'+b.id+'</td>';
+      h+='<td>'+fmtDate(b.placed_at)+'</td>';
+      h+='<td title="'+(b.market_question||'')+'">'+q+'</td>';
+      h+='<td>'+(b.side||'--')+'</td>';
+      h+='<td>$'+(b.price||0).toFixed(2)+'</td>';
+      h+='<td>$'+(b.amount||0).toFixed(2)+'</td>';
+      h+='<td><span class="tag '+(b.result||'pending')+'">'+(b.result||'pending')+'</span></td>';
+      h+='<td>'+(b.result==='pending'?'--':'$'+(b.payout||0).toFixed(2))+'</td>';
+      h+='<td class="'+(b.result==='won'?'positive':b.result==='lost'?'negative':'neutral')+'">'+(b.result==='pending'?'--':fmt(pr))+'</td>';
+      h+='<td>W'+(b.window_id||'--')+'</td>';
+      h+='</tr>';
+    }
+    h+='</table>';
+    document.getElementById('betsTable').innerHTML=h;
+  }
+
+  if(currentTab==='windows'){
+    const data=await fetchJSON('/api/history/windows?limit=500');
+    if(!data||!data.windows||data.windows.length===0){
+      document.getElementById('windowsTable').innerHTML='<div class="empty">No windows yet</div>';
+      return;
+    }
+    const wins=data.windows;
+    const totalProfit=wins.reduce((s,w)=>s+(w.profit||0),0);
+    const totalBets=wins.reduce((s,w)=>s+(w.bets_placed||0),0);
+    const totalPocketed=wins.reduce((s,w)=>s+(w.pocketed||0),0);
+
+    document.getElementById('windowsSummary').innerHTML=
+      '<div class="summary-item">Windows: <b>'+data.total+'</b></div>'+
+      '<div class="summary-item">Total Bets: <b>'+totalBets+'</b></div>'+
+      '<div class="summary-item">Total Profit: <b class="'+(totalProfit>=0?'positive':'negative')+'">'+fmt(totalProfit)+'</b></div>'+
+      '<div class="summary-item">Pocketed: <b class="positive">$'+totalPocketed.toFixed(2)+'</b></div>';
+
+    let h='<table><tr><th>#</th><th>Date</th><th>Bets</th><th>Won</th><th>Lost</th><th>Deployed</th><th>Returned</th><th>Profit</th><th>Pocketed</th><th>Clip</th><th>Phase</th></tr>';
+    for(const w of wins){
+      const p=w.profit||0;
+      h+='<tr>';
+      h+='<td>'+w.id+'</td>';
+      h+='<td>'+fmtDate(w.started_at)+'</td>';
+      h+='<td>'+(w.bets_placed||0)+'</td>';
+      h+='<td class="positive">'+(w.bets_won||0)+'</td>';
+      h+='<td class="negative">'+(w.bets_lost||0)+'</td>';
+      h+='<td>$'+(w.deployed||0).toFixed(2)+'</td>';
+      h+='<td>$'+(w.returned||0).toFixed(2)+'</td>';
+      h+='<td class="'+(p>=0?'positive':'negative')+'">'+fmt(p)+'</td>';
+      h+='<td>$'+(w.pocketed||0).toFixed(2)+'</td>';
+      h+='<td>$'+(w.clip_size||0).toFixed(2)+'</td>';
+      h+='<td><span class="tag '+(w.phase||'growth')+'">'+(w.phase||'--')+'</span></td>';
+      h+='</tr>';
+    }
+    h+='</table>';
+    document.getElementById('windowsTable').innerHTML=h;
+  }
+
+  if(currentTab==='daily'){
+    const data=await fetchJSON('/api/history/daily');
+    if(!data||data.length===0){
+      document.getElementById('dailyTable').innerHTML='<div class="empty">No daily data yet</div>';
+      return;
+    }
+    let h='<table><tr><th>Date</th><th>Bets</th><th>Won</th><th>Lost</th><th>Win Rate</th><th>Deployed</th><th>Profit</th></tr>';
+    let cumProfit=0;
+    const sorted=[...data].reverse();
+    for(const d of sorted){
+      cumProfit+=d.profit||0;
+    }
+    cumProfit=0;
+    for(const d of data){
+      const p=d.profit||0;
+      h+='<tr>';
+      h+='<td>'+d.date+'</td>';
+      h+='<td>'+d.total_bets+'</td>';
+      h+='<td class="positive">'+(d.wins||0)+'</td>';
+      h+='<td class="negative">'+(d.losses||0)+'</td>';
+      h+='<td class="'+(d.win_rate>=85?'positive':d.win_rate>=80?'neutral':'negative')+'">'+(d.win_rate||0)+'%</td>';
+      h+='<td>$'+(d.deployed||0).toFixed(0)+'</td>';
+      h+='<td class="'+(p>=0?'positive':'negative')+'">'+fmt(p)+'</td>';
+      h+='</tr>';
+    }
+    h+='</table>';
+    document.getElementById('dailyTable').innerHTML=h;
+  }
+}
+
+loadData();
 </script>
 </body>
 </html>"""
