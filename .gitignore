@@ -1,0 +1,5 @@
+.env
+vig.db
+vig.log
+__pycache__/
+*.pyc
