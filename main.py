@@ -1,134 +1,239 @@
 """
-Pipe Labs Dashboard - Main FastAPI Application
+Vig v1 — Main loop. Scan → Bet → Settle → Snowball → Repeat.
 """
 import os
-import json
-from contextlib import asynccontextmanager
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+import sys
+import time
+import signal
+import logging
+import random
+from datetime import datetime, timezone
 
-from app.core.database import engine, Base
-from app.api.admin import router as admin_router
-from app.api.agent import router as agent_router
-from app.api.auth import router as auth_router
+from config import Config
+from db import Database, WindowRecord
+from scanner import Scanner
+from snowball import Snowball
+from risk_manager import RiskManager
+from bet_manager import BetManager
+from notifier import Notifier
 
-
-# Parse CORS origins from environment
-def get_cors_origins():
-    cors_env = os.getenv("CORS_ORIGINS", "")
-    if not cors_env:
-        return ["*"]
-    
-    # Try parsing as JSON array first
-    try:
-        origins = json.loads(cors_env)
-        if isinstance(origins, list):
-            return origins
-    except json.JSONDecodeError:
-        pass
-    
-    # Fall back to comma-separated
-    return [origin.strip() for origin in cors_env.split(",") if origin.strip()]
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    
-    # Auto-setup admin wallet on startup (one-time, safe to run multiple times)
-    try:
-        from app.core.database import AsyncSessionLocal
-        from app.models.user import User
-        from web3 import Web3
-        from sqlalchemy import select
-        
-        ADMIN_WALLET = "0x61b6EF3769c88332629fA657508724a912b79101"
-        async with AsyncSessionLocal() as db:
-            wallet = Web3.to_checksum_address(ADMIN_WALLET)
-            result = await db.execute(select(User).where(User.wallet_address == wallet))
-            user = result.scalar_one_or_none()
-            
-            if not user or user.role != "admin":
-                if user:
-                    user.role = "admin"
-                    user.is_active = True
-                else:
-                    user = User(wallet_address=wallet, role="admin", is_active=True)
-                    db.add(user)
-                await db.commit()
-                print(f"✅ Admin wallet set: {wallet}")
-            else:
-                print(f"✅ Admin wallet already set: {wallet}")
-    except Exception as e:
-        print(f"⚠️ Admin setup warning: {e}")
-    
-    yield
-    await engine.dispose()
-
-
-app = FastAPI(
-    title="Pipe Labs Dashboard API",
-    version="0.1.0",
-    lifespan=lifespan,
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    datefmt="%H:%M:%S",
 )
+logger = logging.getLogger("vig")
 
-# Get CORS origins from environment
-cors_origins = get_cors_origins()
-print(f"🌐 CORS origins: {cors_origins}")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=cors_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.include_router(admin_router, prefix="/api/admin", tags=["Admin"])
-app.include_router(agent_router, prefix="/api/agent", tags=["Agent"])
-app.include_router(auth_router, prefix="/api/auth", tags=["Auth"])
+running = True
 
 
-@app.get("/health")
-async def health_check():
-    return {"status": "ok"}
+def signal_handler(sig, frame):
+    global running
+    logger.info("Shutdown signal received. Finishing current window...")
+    running = False
 
 
-@app.get("/")
-async def root():
-    """Root endpoint"""
-    return {
-        "message": "Pipe Labs Dashboard API",
-        "docs": "/docs",
-        "health": "/health"
-    }
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 
-@app.post("/force-admin-setup")
-async def force_admin_setup():
-    """Force admin setup - call this to set admin wallet"""
-    try:
-        from app.core.database import AsyncSessionLocal
-        from app.models.user import User
-        from web3 import Web3
-        from sqlalchemy import select
-        
-        ADMIN_WALLET = "0x61b6EF3769c88332629fA657508724a912b79101"
-        async with AsyncSessionLocal() as db:
-            wallet = Web3.to_checksum_address(ADMIN_WALLET)
-            result = await db.execute(select(User).where(User.wallet_address == wallet))
-            user = result.scalar_one_or_none()
-            
-            if not user:
-                user = User(wallet_address=wallet, role="admin", is_active=True)
-                db.add(user)
-                await db.commit()
-                return {"message": "Admin created", "wallet": wallet, "role": "admin"}
-            else:
-                user.role = "admin"
-                user.is_active = True
-                await db.commit()
-                return {"message": "Admin updated", "wallet": wallet, "role": user.role, "was": "updated"}
-    except Exception as e:
-        return {"error": str(e)}
+def main():
+    global running
+
+    # ── Init ──
+    config = Config()
+    issues = config.validate()
+    if issues:
+        for i in issues:
+            logger.error(f"Config issue: {i}")
+        if not config.paper_mode:
+            sys.exit(1)
+
+    mode = "PAPER" if config.paper_mode else "LIVE"
+    logger.info(f"=== Vig v1 Starting ({mode} mode) ===")
+
+    db = Database(config.db_path)
+    scanner = Scanner(config)
+    snowball = Snowball(config)
+    risk_mgr = RiskManager(config, db)
+    notifier = Notifier(config)
+
+    # CLOB client only for live mode
+    clob_client = None
+    if not config.paper_mode:
+        try:
+            from py_clob_client.client import ClobClient
+            from py_clob_client.clob_types import ApiCreds
+            host = config.clob_url
+            key = config.private_key
+            chain_id = config.chain_id
+            clob_client = ClobClient(host, key=key, chain_id=chain_id)
+            creds = clob_client.create_or_derive_api_creds()
+            clob_client.set_api_creds(creds)
+            logger.info("CLOB client initialized")
+        except Exception as e:
+            logger.error(f"Failed to init CLOB client: {e}")
+            logger.error("Cannot run live mode without CLOB client")
+            sys.exit(1)
+
+    bet_mgr = BetManager(config, db, snowball, clob_client)
+
+    # ── Restore state from last window ──
+    recent_windows = db.get_recent_windows(1)
+    if recent_windows:
+        last = recent_windows[0]
+        snowball.load_state(
+            clip_size=last.clip_size,
+            phase=last.phase,
+            total_pocketed=sum(w.pocketed for w in db.get_recent_windows(999)),
+            bankroll=0,
+            windows_completed=len(db.get_recent_windows(999)),
+        )
+        logger.info(f"Restored: clip=${last.clip_size:.2f} phase={last.phase}")
+    else:
+        logger.info(f"Fresh start: clip=${config.starting_clip:.2f}")
+
+    notifier.startup(mode, snowball.state.clip_size, snowball.state.phase)
+
+    window_count = len(db.get_recent_windows(999))
+
+    # ── Main loop ──
+    while running:
+        window_count += 1
+        logger.info(f"\n{'='*50}")
+        logger.info(f"WINDOW {window_count}")
+        logger.info(f"{'='*50}")
+
+        # 1. Pre-window risk check
+        alerts = risk_mgr.check_pre_window()
+        if risk_mgr.should_stop(alerts):
+            for a in alerts:
+                if a.level == "stop":
+                    notifier.circuit_breaker(a.reason, a.action)
+            logger.error("Circuit breaker: STOP. Exiting.")
+            break
+
+        clip_multiplier = risk_mgr.get_clip_multiplier(alerts)
+        if clip_multiplier < 1.0:
+            logger.warning(f"Risk: clip reduced to {clip_multiplier:.0%}")
+
+        # 2. Scan markets
+        logger.info("Scanning Polymarket for expiring markets...")
+        candidates = scanner.scan()
+
+        if not candidates:
+            logger.info("No qualifying markets found. Waiting for next window.")
+            if running:
+                logger.info(f"Sleeping {config.scan_interval_seconds}s until next window...")
+                for _ in range(config.scan_interval_seconds):
+                    if not running:
+                        break
+                    time.sleep(1)
+            continue
+
+        # 3. Create window record
+        now = datetime.now(timezone.utc).isoformat()
+        window = WindowRecord(
+            started_at=now,
+            clip_size=snowball.state.clip_size,
+            phase=snowball.state.phase,
+        )
+        window_id = db.insert_window(window)
+
+        # 4. Place bets
+        logger.info(f"Placing bets on {len(candidates)} markets...")
+        bets = bet_mgr.place_bets(candidates, window_id, clip_multiplier)
+
+        if not bets:
+            logger.info("No bets placed (all filtered out).")
+            db.update_window(window_id, bets_placed=0, ended_at=now)
+            continue
+
+        total_deployed = sum(b.amount for b in bets)
+        db.update_window(window_id, bets_placed=len(bets), deployed=total_deployed)
+        logger.info(f"Placed {len(bets)} bets, ${total_deployed:.2f} deployed")
+
+        # 5. Wait for settlement
+        if config.paper_mode:
+            logger.info("Paper mode: settling immediately...")
+            time.sleep(2)
+        else:
+            logger.info("Waiting for markets to resolve...")
+            timeout = config.settle_timeout_seconds
+            check_interval = config.settle_check_interval_seconds
+            elapsed = 0
+            while elapsed < timeout and running:
+                pending = db.get_pending_bets(window_id)
+                if not pending:
+                    break
+                time.sleep(check_interval)
+                elapsed += check_interval
+                if elapsed % 300 == 0:
+                    logger.info(f"  Still waiting... {len(pending)} pending, {elapsed}s elapsed")
+
+        # 6. Settle bets
+        logger.info("Settling bets...")
+        result = bet_mgr.settle_bets(window_id)
+
+        wins = result["wins"]
+        losses = result["losses"]
+        window_profit = result["profit"]
+        returned = result.get("returned", 0)
+
+        logger.info(f"Results: {wins}W {losses}L | Profit: ${window_profit:.2f}")
+
+        # 7. Snowball
+        sb_result = snowball.process_window(window_profit, len(bets))
+        pocketed = sb_result["pocketed"]
+
+        # 8. Update window record
+        db.update_window(window_id,
+            ended_at=datetime.now(timezone.utc).isoformat(),
+            bets_won=wins, bets_lost=losses, bets_pending=result.get("still_pending", 0),
+            returned=returned, profit=window_profit,
+            pocketed=pocketed, clip_size=sb_result["new_clip"],
+            phase=sb_result["phase"],
+        )
+
+        # 9. Post-window risk check
+        post_alerts = risk_mgr.check_post_window(losses)
+        for a in post_alerts:
+            logger.warning(str(a))
+
+        # 10. Report
+        stats = db.get_all_stats()
+        total_resolved = (stats.get("wins") or 0) + (stats.get("losses") or 0)
+        win_rate = ((stats.get("wins") or 0) / total_resolved * 100) if total_resolved > 0 else 0
+
+        logger.info(f"")
+        logger.info(f"  Window {window_count}: {wins}W {losses}L")
+        logger.info(f"  Profit: ${window_profit:.2f} | Pocketed: ${pocketed:.2f}")
+        logger.info(f"  Clip: ${sb_result['new_clip']:.2f} ({sb_result['phase']})")
+        logger.info(f"  Win Rate: {win_rate:.1f}% over {total_resolved} bets")
+        logger.info(f"  Total Pocketed: ${snowball.state.total_pocketed:.2f}")
+
+        notifier.window_summary(
+            window_count, len(bets), wins, losses,
+            window_profit, pocketed, sb_result["new_clip"],
+            sb_result["phase"], snowball.state.total_pocketed, win_rate,
+        )
+
+        if sb_result.get("hit_max"):
+            notifier.milestone(f"Hit ${config.max_clip:.0f} max clip! Switching to HARVEST mode.")
+
+        # 11. Sleep until next window
+        if running:
+            logger.info(f"Next window in {config.scan_interval_seconds}s...")
+            for _ in range(config.scan_interval_seconds):
+                if not running:
+                    break
+                time.sleep(1)
+
+    # Cleanup
+    logger.info("Vig shutting down.")
+    scanner.close()
+    db.close()
+
+
+if __name__ == "__main__":
+    main()
