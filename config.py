@@ -18,16 +18,16 @@ class Config:
     funder_address: str = field(default_factory=lambda: os.getenv("POLYGON_FUNDER_ADDRESS", ""))
     signature_type: int = int(os.getenv("SIGNATURE_TYPE", "0"))
 
-    min_favorite_price: float = 0.70
-    max_favorite_price: float = 0.90
-    expiry_window_minutes: int = 60
-    max_bets_per_window: int = 15
+    min_favorite_price: float = float(os.getenv("MIN_FAVORITE_PRICE", "0.70"))
+    max_favorite_price: float = float(os.getenv("MAX_FAVORITE_PRICE", "0.90"))
+    expiry_window_minutes: int = int(os.getenv("EXPIRY_WINDOW_MINUTES", "60"))
+    max_bets_per_window: int = int(os.getenv("MAX_BETS_PER_WINDOW", "10"))
     starting_clip: float = 10.0
     max_clip: float = 100.0
     snowball_reinvest_pct: float = 0.50
 
     max_volume_pct: float = 0.02
-    min_volume_abs: float = 5000.0
+    min_volume_abs: float = float(os.getenv("MIN_VOLUME_ABS", "100"))
 
     circuit_breaker_consecutive_losses: int = 5
     circuit_breaker_daily_loss_pct: float = 0.15
@@ -35,7 +35,7 @@ class Config:
     circuit_breaker_win_rate_lookback: int = 100
     circuit_breaker_window_max_losses: int = 4
 
-    scan_interval_seconds: int = 60 * 60
+    scan_interval_seconds: int = int(os.getenv("SCAN_INTERVAL_SECONDS", "3600"))
     settle_check_interval_seconds: int = 30
     settle_timeout_seconds: int = 60 * 90
 
