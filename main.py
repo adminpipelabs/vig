@@ -151,112 +151,112 @@ def main():
                 db.conn.execute("UPDATE bets SET window_id = ? WHERE id = ?", (window_id, bet.id))
             db.conn.commit()
 
-        total_deployed = sum(b.amount for b in bets)
-        db.update_window(window_id, bets_placed=len(bets), deployed=total_deployed)
-        logger.info(f"Placed {len(bets)} bets, ${total_deployed:.2f} deployed")
+            total_deployed = sum(b.amount for b in bets)
+            db.update_window(window_id, bets_placed=len(bets), deployed=total_deployed)
+            logger.info(f"Placed {len(bets)} bets, ${total_deployed:.2f} deployed")
 
-        # 5. Wait for settlement
-        if config.paper_mode:
-            logger.info("Paper mode: settling immediately...")
-            time.sleep(2)
-        else:
-            logger.info("Waiting for markets to resolve...")
-            timeout = config.settle_timeout_seconds
-            check_interval = config.settle_check_interval_seconds
-            elapsed = 0
-            while elapsed < timeout and running:
-                pending = db.get_pending_bets(window_id)
-                if not pending:
-                    break
-                time.sleep(check_interval)
-                elapsed += check_interval
-                if elapsed % 300 == 0:
-                    logger.info(f"  Still waiting... {len(pending)} pending, {elapsed}s elapsed")
+            # 5. Wait for settlement
+            if config.paper_mode:
+                logger.info("Paper mode: settling immediately...")
+                time.sleep(2)
+            else:
+                logger.info("Waiting for markets to resolve...")
+                timeout = config.settle_timeout_seconds
+                check_interval = config.settle_check_interval_seconds
+                elapsed = 0
+                while elapsed < timeout and running:
+                    pending = db.get_pending_bets(window_id)
+                    if not pending:
+                        break
+                    time.sleep(check_interval)
+                    elapsed += check_interval
+                    if elapsed % 300 == 0:
+                        logger.info(f"  Still waiting... {len(pending)} pending, {elapsed}s elapsed")
 
-        # 6. Settle bets
-        logger.info("Settling bets...")
-        # First settle bets from current window
-        result = bet_mgr.settle_bets(window_id)
-        
-        # Also check and settle any pending bets from previous windows
-        all_pending = db.get_all_pending_bets()
-        old_pending = [b for b in all_pending if b.window_id != window_id]
-        if old_pending:
-            logger.info(f"Checking {len(old_pending)} pending bets from previous windows...")
-            for bet in old_pending:
-                try:
-                    logger.debug(f"[SETTLEMENT] Checking bet {bet.id}: {bet.market_question[:50]}")
-                    if config.paper_mode:
-                        result_check, payout = bet_mgr._simulate_settlement(bet)
-                    else:
-                        result_check, payout = bet_mgr._check_live_settlement(bet)
-                    logger.debug(f"[SETTLEMENT] Bet {bet.id} result: {result_check}, payout: {payout}")
-                    
-                    if result_check != "pending":
-                        profit = payout - bet.amount if result_check == "won" else -bet.amount
-                        db.update_bet_result(bet.id, result_check, payout, profit)
-                        emoji = "W" if result_check == "won" else "L"
-                        logger.info(f"  [{emoji}] Settled old bet: {bet.market_question[:40]} -> {result_check}")
-                        # Update result counts
-                        if result_check == "won":
-                            result["wins"] += 1
-                            result["returned"] = result.get("returned", 0) + payout
+            # 6. Settle bets
+            logger.info("Settling bets...")
+            # First settle bets from current window
+            result = bet_mgr.settle_bets(window_id)
+            
+            # Also check and settle any pending bets from previous windows
+            all_pending = db.get_all_pending_bets()
+            old_pending = [b for b in all_pending if b.window_id != window_id]
+            if old_pending:
+                logger.info(f"Checking {len(old_pending)} pending bets from previous windows...")
+                for bet in old_pending:
+                    try:
+                        logger.debug(f"[SETTLEMENT] Checking bet {bet.id}: {bet.market_question[:50]}")
+                        if config.paper_mode:
+                            result_check, payout = bet_mgr._simulate_settlement(bet)
                         else:
-                            result["losses"] += 1
-                        result["profit"] += profit
-                        result["settled"] += 1
-                    else:
-                        logger.debug(f"[SETTLEMENT] Bet {bet.id} still pending")
-                except Exception as e:
-                    logger.error(f"[SETTLEMENT] ERROR on bet {bet.id} ({bet.market_question[:40]}): {e}")
-                    import traceback
-                    logger.error(traceback.format_exc())
+                            result_check, payout = bet_mgr._check_live_settlement(bet)
+                        logger.debug(f"[SETTLEMENT] Bet {bet.id} result: {result_check}, payout: {payout}")
+                        
+                        if result_check != "pending":
+                            profit = payout - bet.amount if result_check == "won" else -bet.amount
+                            db.update_bet_result(bet.id, result_check, payout, profit)
+                            emoji = "W" if result_check == "won" else "L"
+                            logger.info(f"  [{emoji}] Settled old bet: {bet.market_question[:40]} -> {result_check}")
+                            # Update result counts
+                            if result_check == "won":
+                                result["wins"] += 1
+                                result["returned"] = result.get("returned", 0) + payout
+                            else:
+                                result["losses"] += 1
+                            result["profit"] += profit
+                            result["settled"] += 1
+                        else:
+                            logger.debug(f"[SETTLEMENT] Bet {bet.id} still pending")
+                    except Exception as e:
+                        logger.error(f"[SETTLEMENT] ERROR on bet {bet.id} ({bet.market_question[:40]}): {e}")
+                        import traceback
+                        logger.error(traceback.format_exc())
 
-        wins = result["wins"]
-        losses = result["losses"]
-        window_profit = result["profit"]
-        returned = result.get("returned", 0)
+            wins = result["wins"]
+            losses = result["losses"]
+            window_profit = result["profit"]
+            returned = result.get("returned", 0)
 
-        logger.info(f"Results: {wins}W {losses}L | Profit: ${window_profit:.2f}")
+            logger.info(f"Results: {wins}W {losses}L | Profit: ${window_profit:.2f}")
 
-        # 7. Snowball
-        sb_result = snowball.process_window(window_profit, len(bets))
-        pocketed = sb_result["pocketed"]
+            # 7. Snowball
+            sb_result = snowball.process_window(window_profit, len(bets))
+            pocketed = sb_result["pocketed"]
 
-        # 8. Update window record
-        db.update_window(window_id,
-            ended_at=datetime.now(timezone.utc).isoformat(),
-            bets_won=wins, bets_lost=losses, bets_pending=result.get("still_pending", 0),
-            returned=returned, profit=window_profit,
-            pocketed=pocketed, clip_size=sb_result["new_clip"],
-            phase=sb_result["phase"],
-        )
+            # 8. Update window record
+            db.update_window(window_id,
+                ended_at=datetime.now(timezone.utc).isoformat(),
+                bets_won=wins, bets_lost=losses, bets_pending=result.get("still_pending", 0),
+                returned=returned, profit=window_profit,
+                pocketed=pocketed, clip_size=sb_result["new_clip"],
+                phase=sb_result["phase"],
+            )
 
-        # 9. Post-window risk check
-        post_alerts = risk_mgr.check_post_window(losses)
-        for a in post_alerts:
-            logger.warning(str(a))
+            # 9. Post-window risk check
+            post_alerts = risk_mgr.check_post_window(losses)
+            for a in post_alerts:
+                logger.warning(str(a))
 
-        # 10. Report
-        stats = db.get_all_stats()
-        total_resolved = (stats.get("wins") or 0) + (stats.get("losses") or 0)
-        win_rate = ((stats.get("wins") or 0) / total_resolved * 100) if total_resolved > 0 else 0
+            # 10. Report
+            stats = db.get_all_stats()
+            total_resolved = (stats.get("wins") or 0) + (stats.get("losses") or 0)
+            win_rate = ((stats.get("wins") or 0) / total_resolved * 100) if total_resolved > 0 else 0
 
-        logger.info(f"")
-        logger.info(f"  Window {window_count}: {wins}W {losses}L")
-        logger.info(f"  Profit: ${window_profit:.2f} | Pocketed: ${pocketed:.2f}")
-        logger.info(f"  Clip: ${sb_result['new_clip']:.2f} ({sb_result['phase']})")
-        logger.info(f"  Win Rate: {win_rate:.1f}% over {total_resolved} bets")
-        logger.info(f"  Total Pocketed: ${snowball.state.total_pocketed:.2f}")
+            logger.info(f"")
+            logger.info(f"  Window {window_count}: {wins}W {losses}L")
+            logger.info(f"  Profit: ${window_profit:.2f} | Pocketed: ${pocketed:.2f}")
+            logger.info(f"  Clip: ${sb_result['new_clip']:.2f} ({sb_result['phase']})")
+            logger.info(f"  Win Rate: {win_rate:.1f}% over {total_resolved} bets")
+            logger.info(f"  Total Pocketed: ${snowball.state.total_pocketed:.2f}")
 
-        notifier.window_summary(
-            window_count, len(bets), wins, losses,
-            window_profit, pocketed, sb_result["new_clip"],
-            sb_result["phase"], snowball.state.total_pocketed, win_rate,
-        )
+            notifier.window_summary(
+                window_count, len(bets), wins, losses,
+                window_profit, pocketed, sb_result["new_clip"],
+                sb_result["phase"], snowball.state.total_pocketed, win_rate,
+            )
 
-        if sb_result.get("hit_max"):
-            notifier.milestone(f"Hit ${config.max_clip:.0f} max clip! Switching to HARVEST mode.")
+            if sb_result.get("hit_max"):
+                notifier.milestone(f"Hit ${config.max_clip:.0f} max clip! Switching to HARVEST mode.")
 
         except Exception as e:
             logger.error(f"[ERROR] Main loop error: {e}")
