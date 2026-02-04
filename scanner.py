@@ -112,7 +112,8 @@ class Scanner:
                 return None
 
             minutes_to_expiry = (end_date - now).total_seconds() / 60
-            if minutes_to_expiry <= 0:
+            # Filter: only markets expiring within the expiry window (typically 60 minutes)
+            if minutes_to_expiry <= 0 or minutes_to_expiry > self.config.expiry_window_minutes:
                 return None
 
             prices = self._parse_prices(market.get("outcomePrices", ""))
