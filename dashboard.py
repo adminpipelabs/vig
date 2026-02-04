@@ -9,6 +9,10 @@ Vig v1 Production Dashboard
 import os
 import json
 import sqlite3
+import hashlib
+import secrets
+import time
+from typing import Optional
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from fastapi import FastAPI, Request
@@ -18,6 +22,51 @@ import httpx
 app = FastAPI(title="Vig Dashboard")
 
 DB_PATH = os.getenv("DB_PATH", "vig.db")
+DASH_PASSWORD = os.getenv("DASH_PASSWORD", "vig2026")
+AUTH_SECRET = os.getenv("AUTH_SECRET", secrets.token_hex(32))
+AUTH_EXPIRY = 86400 * 7  # 7 days
+
+
+def make_token():
+    ts = str(int(time.time()))
+    raw = f"{DASH_PASSWORD}:{ts}:{AUTH_SECRET}"
+    sig = hashlib.sha256(raw.encode()).hexdigest()[:24]
+    return f"{ts}.{sig}"
+
+
+def verify_token(token: str) -> bool:
+    try:
+        parts = token.split(".")
+        if len(parts) != 2:
+            return False
+        ts, sig = parts
+        if int(time.time()) - int(ts) > AUTH_EXPIRY:
+            return False
+        raw = f"{DASH_PASSWORD}:{ts}:{AUTH_SECRET}"
+        expected = hashlib.sha256(raw.encode()).hexdigest()[:24]
+        return sig == expected
+    except:
+        return False
+
+
+def get_token_from_request(request: Request) -> Optional[str]:
+    # Check cookie first
+    token = request.cookies.get("vig_auth")
+    if token:
+        return token
+    # Check Authorization header
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:]
+    # Check query param (for initial page loads)
+    return request.query_params.get("token")
+
+
+def require_auth(request: Request):
+    token = get_token_from_request(request)
+    if not token or not verify_token(token):
+        return False
+    return True
 GAMMA_URL = "https://gamma-api.polymarket.com"
 
 # Polygon USDC contract
@@ -95,6 +144,56 @@ async def get_usdc_balance(address: str) -> float:
 
 
 # ─── API Endpoints ─────────────────────────────────────────────
+
+@app.post("/api/login")
+async def api_login(request: Request):
+    body = await request.json()
+    pw = body.get("password", "")
+    if pw == DASH_PASSWORD:
+        token = make_token()
+        resp = JSONResponse({"ok": True, "token": token})
+        resp.set_cookie("vig_auth", token, max_age=AUTH_EXPIRY, httponly=True, samesite="lax")
+        return resp
+    return JSONResponse({"ok": False, "error": "Invalid password"}, status_code=401)
+
+
+@app.get("/api/auth-check")
+async def api_auth_check(request: Request):
+    if require_auth(request):
+        return {"authenticated": True}
+    return JSONResponse({"authenticated": False}, status_code=401)
+
+
+@app.post("/api/logout")
+async def api_logout():
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie("vig_auth")
+    return resp
+
+
+@app.post("/api/toggle-mode")
+async def api_toggle_mode(request: Request):
+    if not require_auth(request):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    body = await request.json()
+    paper = body.get("paper_mode", True)
+    # Write to settings file
+    settings = load_settings()
+    settings["paper_mode"] = paper
+    save_settings(settings)
+    # Also update env file if it exists
+    env_path = ".env"
+    if os.path.exists(env_path):
+        with open(env_path, "r") as f:
+            lines = f.readlines()
+        with open(env_path, "w") as f:
+            for line in lines:
+                if line.strip().startswith("PAPER_MODE"):
+                    f.write(f"PAPER_MODE={'true' if paper else 'false'}\n")
+                else:
+                    f.write(line)
+    return {"ok": True, "paper_mode": paper}
+
 
 @app.get("/api/wallet")
 async def api_wallet():
@@ -369,13 +468,24 @@ def api_history_daily():
 
 # ─── Dashboard HTML ────────────────────────────────────────────
 
+@app.get("/login", response_class=HTMLResponse)
+def login_page():
+    return LOGIN_HTML
+
+
 @app.get("/", response_class=HTMLResponse)
-def dashboard():
+async def dashboard(request: Request):
+    if not require_auth(request):
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse("/login")
     return DASHBOARD_HTML
 
 
 @app.get("/history", response_class=HTMLResponse)
-def history_page():
+async def history_page(request: Request):
+    if not require_auth(request):
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse("/login")
     return HISTORY_HTML
 
 
@@ -603,6 +713,8 @@ canvas { width:100%!important; height:100%!important; }
       </div>
       <div style="margin-top:14px;display:flex;gap:8px;align-items:center">
         <button class="btn btn-green" onclick="saveSettings()">Save Settings</button>
+        <button class="btn btn-amber" id="modeToggle" onclick="toggleMode()">Switch to Live</button>
+        <button class="btn" onclick="doLogout()" style="margin-left:auto;color:var(--red);border-color:rgba(239,68,68,0.3)">Logout</button>
       </div>
     </div>
     <div class="card">
@@ -812,6 +924,20 @@ async function refresh(){
     options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#52525b',font:{size:9,family:'IBM Plex Mono'}},grid:{color:'rgba(255,255,255,0.03)'}},y:{ticks:{color:'#52525b',font:{size:9,family:'IBM Plex Mono'},callback:v=>'$'+v},grid:{color:'rgba(255,255,255,0.03)'}}},interaction:{intersect:false,mode:'index'}}})}
 }
 
+async function toggleMode(){
+  const btn=$('modeToggle');
+  const current=btn.textContent.includes('Live');
+  const newMode=current?false:true; // if button says "Switch to Live", we're in paper, go live
+  if(!newMode&&!confirm('Switch to LIVE mode? This will use real funds.'))return;
+  btn.disabled=true;
+  await fetch('/api/toggle-mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({paper_mode:newMode})});
+  btn.disabled=false;
+  refreshWallet();loadSettings();
+}
+async function doLogout(){
+  await fetch('/api/logout',{method:'POST'});
+  window.location.href='/login';
+}
 refreshWallet();loadSettings();refresh();runScan();
 setInterval(refresh,15000);
 setInterval(refreshWallet,30000);
@@ -939,6 +1065,66 @@ async function load(){
     h+='</table>';document.getElementById('dailyTable').innerHTML=h}
 }
 load();
+</script>
+</body>
+</html>"""
+
+
+LOGIN_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vig — Login</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=Instrument+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #09090b; --surface: #111114; --surface2: #19191f;
+  --border: #27272a; --text: #fafafa; --text-dim: #71717a; --text-muted: #52525b;
+  --green: #22c55e; --green-dim: rgba(34,197,94,0.1);
+  --red: #ef4444; --red-dim: rgba(239,68,68,0.1);
+  --mono: 'IBM Plex Mono', monospace;
+  --sans: 'Instrument Sans', sans-serif;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:var(--bg); color:var(--text); font-family:var(--mono); min-height:100vh; display:flex; align-items:center; justify-content:center; }
+.login-box { width:380px; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:40px 36px; text-align:center; }
+.login-logo { font-family:var(--sans); font-size:42px; font-weight:700; letter-spacing:-2px; margin-bottom:8px; }
+.login-logo em { font-style:normal; color:var(--green); }
+.login-sub { font-size:12px; color:var(--text-muted); margin-bottom:32px; }
+.login-input { width:100%; background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:12px 16px; color:var(--text); font-family:var(--mono); font-size:14px; text-align:center; letter-spacing:2px; transition:border-color 0.2s; margin-bottom:16px; }
+.login-input:focus { outline:none; border-color:var(--green); }
+.login-input::placeholder { letter-spacing:0; color:var(--text-muted); }
+.login-btn { width:100%; padding:12px; border-radius:8px; font-size:13px; font-weight:600; font-family:var(--mono); cursor:pointer; border:1px solid rgba(34,197,94,0.3); background:var(--green-dim); color:var(--green); text-transform:uppercase; letter-spacing:1px; transition:all 0.2s; }
+.login-btn:hover { background:rgba(34,197,94,0.2); }
+.login-btn:disabled { opacity:0.4; cursor:wait; }
+.login-err { font-size:11px; color:var(--red); margin-top:12px; min-height:16px; }
+.login-hint { font-size:10px; color:var(--text-muted); margin-top:20px; }
+</style>
+</head>
+<body>
+<div class="login-box">
+  <div class="login-logo">V<em>ig</em></div>
+  <div class="login-sub">Prediction Market Trading Bot</div>
+  <input class="login-input" id="pw" type="password" placeholder="Enter password" autofocus>
+  <button class="login-btn" id="loginBtn" onclick="doLogin()">Sign In</button>
+  <div class="login-err" id="loginErr"></div>
+  <div class="login-hint">Set DASH_PASSWORD in environment variables</div>
+</div>
+<script>
+document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin()});
+async function doLogin(){
+  const btn=document.getElementById('loginBtn');
+  const err=document.getElementById('loginErr');
+  btn.disabled=true;btn.textContent='...';err.textContent='';
+  try{
+    const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:document.getElementById('pw').value})});
+    const d=await r.json();
+    if(d.ok){window.location.href='/'}
+    else{err.textContent=d.error||'Invalid password'}
+  }catch(e){err.textContent='Connection error'}
+  btn.disabled=false;btn.textContent='Sign In';
+}
 </script>
 </body>
 </html>"""
