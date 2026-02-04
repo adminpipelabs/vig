@@ -149,6 +149,12 @@ def main():
         if not bets:
             logger.info("No bets placed (all filtered out).")
             db.update_window(window_id, bets_placed=0, ended_at=now)
+            if running:
+                logger.info(f"Sleeping {config.scan_interval_seconds}s until next window...")
+                for _ in range(config.scan_interval_seconds):
+                    if not running:
+                        break
+                    time.sleep(1)
             continue
 
         total_deployed = sum(b.amount for b in bets)
