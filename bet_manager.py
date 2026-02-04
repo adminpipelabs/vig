@@ -23,12 +23,33 @@ class BetManager:
 
     def place_bets(self, candidates, window_id, clip_multiplier=1.0):
         bets = []
+        
+        # Get current balance for live trading
+        available_balance = None
+        if not self.config.paper_mode and self.clob_client:
+            try:
+                from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+                params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=0)
+                balance_info = self.clob_client.get_balance_allowance(params)
+                available_balance = float(balance_info.get("balance", 0)) / 1e6  # USDC.e has 6 decimals
+                logger.info(f"Available CLOB balance: ${available_balance:.2f}")
+            except Exception as e:
+                logger.warning(f"Could not check balance: {e}")
+        
         for market in candidates:
             base_clip = self.snowball.get_clip_for_market(
                 max_clip_for_volume=market.max_clip or self.config.max_clip)
             clip = base_clip * clip_multiplier
             if clip < 1.0:
                 continue
+
+            # Check balance before placing bet (live mode only)
+            if not self.config.paper_mode and available_balance is not None:
+                if available_balance < clip:
+                    logger.warning(f"Insufficient balance (${available_balance:.2f}) for clip ${clip:.2f} — stopping this window")
+                    break
+                # Update available balance after each bet
+                available_balance -= clip
 
             size = clip / market.fav_price
             bet = BetRecord(
@@ -60,11 +81,12 @@ class BetManager:
         if not self.clob_client:
             return None
         try:
-            from py_clob_client.clob_types import OrderArgs
+            from py_clob_client.clob_types import OrderArgs, OrderType
             from py_clob_client.order_builder.constants import BUY
             order_args = OrderArgs(price=market.fav_price, size=size,
                                    side=BUY, token_id=market.fav_token_id)
-            resp = self.clob_client.create_and_post_order(order_args)
+            signed_order = self.clob_client.create_order(order_args)
+            resp = self.clob_client.post_order(signed_order, OrderType.GTC)
             if isinstance(resp, dict):
                 return resp.get("orderID", resp.get("id", str(resp)))
             return str(resp)
@@ -117,17 +139,14 @@ class BetManager:
         return "lost", 0.0
 
     def _check_live_settlement(self, bet):
-        if not self.clob_client:
-            return "pending", 0.0
+        # Settlement check doesn't require CLOB client - just checks Gamma API
         try:
             import httpx, json
-            resp = httpx.get(f"{self.config.gamma_url}/markets/{bet.market_id}")
+            resp = httpx.get(f"{self.config.gamma_url}/markets/{bet.market_id}", timeout=10)
             if resp.status_code != 200:
                 return "pending", 0.0
             market = resp.json()
-            if not market.get("closed", False):
-                return "pending", 0.0
-
+            
             outcome_prices = market.get("outcomePrices", "")
             if not outcome_prices:
                 return "pending", 0.0
@@ -139,10 +158,18 @@ class BetManager:
 
             idx = 0 if bet.side == "YES" else 1
             winning_price = prices[idx] if len(prices) > idx else 0
-            if winning_price >= 0.95:
-                return "won", bet.size
-            elif winning_price <= 0.05:
-                return "lost", 0.0
+            
+            # Check if market is resolved (either closed OR prices show clear resolution)
+            # Polymarket sometimes shows resolved prices before marking market as closed
+            market_closed = market.get("closed", False)
+            clearly_resolved = winning_price >= 0.95 or winning_price <= 0.05
+            
+            if market_closed or clearly_resolved:
+                if winning_price >= 0.95:
+                    return "won", bet.size
+                elif winning_price <= 0.05:
+                    return "lost", 0.0
+            
             return "pending", 0.0
         except Exception as e:
             logger.debug(f"Settlement check failed: {e}")
