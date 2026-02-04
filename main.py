@@ -17,8 +17,10 @@ from risk_manager import RiskManager
 from bet_manager import BetManager
 from notifier import Notifier
 
+# Set log level from config (default to DEBUG for settlement debugging)
+log_level = os.getenv("LOG_LEVEL", "DEBUG").upper()
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, log_level, logging.DEBUG),
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     datefmt="%H:%M:%S",
 )
