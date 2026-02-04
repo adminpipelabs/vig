@@ -22,8 +22,8 @@ class Config:
     max_favorite_price: float = float(os.getenv("MAX_FAVORITE_PRICE", "0.90"))
     expiry_window_minutes: int = int(os.getenv("EXPIRY_WINDOW_MINUTES", "60"))
     max_bets_per_window: int = int(os.getenv("MAX_BETS_PER_WINDOW", "10"))
-    starting_clip: float = 10.0
-    max_clip: float = 100.0
+    starting_clip: float = float(os.getenv("STARTING_CLIP", "10.0"))
+    max_clip: float = float(os.getenv("MAX_CLIP", "100.0"))
     snowball_reinvest_pct: float = 0.50
 
     max_volume_pct: float = 0.02

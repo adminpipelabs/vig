@@ -1,10 +1,10 @@
 [build]
 builder = "nixpacks"
+buildCommand = "pip install -r requirements.txt"
 
 [deploy]
-startCommand = "python dashboard.py"
-
-[variables]
-PAPER_MODE = "true"
-DB_PATH = "vig.db"
-PORT = "8080"
+startCommand = "python -m uvicorn dashboard:app --host 0.0.0.0 --port ${PORT:-8080} & python main.py & wait"
+healthcheckPath = "/"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
