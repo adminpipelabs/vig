@@ -142,35 +142,52 @@ class BetManager:
         # Settlement check doesn't require CLOB client - just checks Gamma API
         try:
             import httpx, json
+            logger.debug(f"[SETTLEMENT] Fetching market {bet.market_id} for bet {bet.id}")
             resp = httpx.get(f"{self.config.gamma_url}/markets/{bet.market_id}", timeout=10)
             if resp.status_code != 200:
+                logger.debug(f"[SETTLEMENT] Market {bet.market_id} API returned {resp.status_code}")
                 return "pending", 0.0
             market = resp.json()
             
             outcome_prices = market.get("outcomePrices", "")
+            market_closed = market.get("closed", False)
+            logger.debug(f"[SETTLEMENT] Market {bet.market_id}: closed={market_closed}, prices={outcome_prices[:50] if outcome_prices else 'None'}")
+            
             if not outcome_prices:
+                logger.debug(f"[SETTLEMENT] No outcome prices for market {bet.market_id}")
                 return "pending", 0.0
-            if outcome_prices.startswith("["):
+            
+            # Parse prices - handle both string and list formats
+            if isinstance(outcome_prices, list):
+                prices = [float(p) for p in outcome_prices]
+            elif outcome_prices.startswith("["):
                 prices = json.loads(outcome_prices)
+                prices = [float(p) for p in prices]
             else:
                 prices = outcome_prices.split(",")
-            prices = [float(p.strip().strip('"')) for p in prices]
+                prices = [float(p.strip().strip('"')) for p in prices]
 
             idx = 0 if bet.side == "YES" else 1
             winning_price = prices[idx] if len(prices) > idx else 0
             
+            logger.debug(f"[SETTLEMENT] Bet {bet.id} ({bet.side}): winning_price={winning_price:.4f}")
+            
             # Check if market is resolved (either closed OR prices show clear resolution)
             # Polymarket sometimes shows resolved prices before marking market as closed
-            market_closed = market.get("closed", False)
             clearly_resolved = winning_price >= 0.95 or winning_price <= 0.05
             
             if market_closed or clearly_resolved:
                 if winning_price >= 0.95:
+                    logger.debug(f"[SETTLEMENT] Bet {bet.id} WON (price {winning_price:.4f} >= 0.95)")
                     return "won", bet.size
                 elif winning_price <= 0.05:
+                    logger.debug(f"[SETTLEMENT] Bet {bet.id} LOST (price {winning_price:.4f} <= 0.05)")
                     return "lost", 0.0
             
+            logger.debug(f"[SETTLEMENT] Bet {bet.id} still pending (price {winning_price:.4f} not clearly resolved)")
             return "pending", 0.0
         except Exception as e:
-            logger.debug(f"Settlement check failed: {e}")
+            logger.error(f"[SETTLEMENT] Settlement check failed for bet {bet.id}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return "pending", 0.0

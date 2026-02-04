@@ -63,7 +63,7 @@ def main():
     if not config.paper_mode:
         try:
             from py_clob_client.client import ClobClient
-            from py_clob_client.clob_types import ApiCreds
+            # EOA initialization — no funder, no signature_type for direct EOA wallets
             host = config.clob_url
             key = config.private_key
             chain_id = config.chain_id
@@ -173,7 +173,42 @@ def main():
 
         # 6. Settle bets
         logger.info("Settling bets...")
+        # First settle bets from current window
         result = bet_mgr.settle_bets(window_id)
+        
+        # Also check and settle any pending bets from previous windows
+        all_pending = db.get_all_pending_bets()
+        old_pending = [b for b in all_pending if b.window_id != window_id]
+        if old_pending:
+            logger.info(f"Checking {len(old_pending)} pending bets from previous windows...")
+            for bet in old_pending:
+                try:
+                    logger.debug(f"[SETTLEMENT] Checking bet {bet.id}: {bet.market_question[:50]}")
+                    if config.paper_mode:
+                        result_check, payout = bet_mgr._simulate_settlement(bet)
+                    else:
+                        result_check, payout = bet_mgr._check_live_settlement(bet)
+                    logger.debug(f"[SETTLEMENT] Bet {bet.id} result: {result_check}, payout: {payout}")
+                    
+                    if result_check != "pending":
+                        profit = payout - bet.amount if result_check == "won" else -bet.amount
+                        db.update_bet_result(bet.id, result_check, payout, profit)
+                        emoji = "W" if result_check == "won" else "L"
+                        logger.info(f"  [{emoji}] Settled old bet: {bet.market_question[:40]} -> {result_check}")
+                        # Update result counts
+                        if result_check == "won":
+                            result["wins"] += 1
+                            result["returned"] = result.get("returned", 0) + payout
+                        else:
+                            result["losses"] += 1
+                        result["profit"] += profit
+                        result["settled"] += 1
+                    else:
+                        logger.debug(f"[SETTLEMENT] Bet {bet.id} still pending")
+                except Exception as e:
+                    logger.error(f"[SETTLEMENT] ERROR on bet {bet.id} ({bet.market_question[:40]}): {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
 
         wins = result["wins"]
         losses = result["losses"]
