@@ -13,13 +13,47 @@ import httpx
 app = FastAPI(title="Vig Dashboard")
 
 DB_PATH = os.getenv("DB_PATH", "vig.db")
+DATABASE_URL = os.getenv("DATABASE_URL")
 GAMMA_URL = "https://gamma-api.polymarket.com"
 
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    """Get database connection - PostgreSQL if DATABASE_URL is set, otherwise SQLite"""
+    if DATABASE_URL:
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictRow
+            conn = psycopg2.connect(DATABASE_URL)
+            conn.set_session(autocommit=False)
+            # Use RealDictRow for PostgreSQL to match SQLite Row behavior
+            return conn
+        except ImportError:
+            print("Warning: DATABASE_URL set but psycopg2 not installed. Falling back to SQLite.")
+            print("Install with: pip install psycopg2-binary")
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            return conn
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+def is_postgres(conn):
+    """Check if connection is PostgreSQL"""
+    return hasattr(conn, 'server_version')
+
+def execute_query(conn, query, params=None):
+    """Execute query with appropriate parameter style (%s for PostgreSQL, ? for SQLite)"""
+    c = conn.cursor()
+    if is_postgres(conn) and params:
+        # Convert ? to %s for PostgreSQL
+        query = query.replace('?', '%s')
+        c.execute(query, params)
+    elif params:
+        c.execute(query, params)
+    else:
+        c.execute(query)
+    return c
 
 
 # ─── API Endpoints ─────────────────────────────────────────────
@@ -35,7 +69,8 @@ def api_stats():
             SUM(CASE WHEN result='pending' THEN 1 ELSE 0 END) as pending,
             COALESCE(SUM(profit), 0) as total_profit,
             COALESCE(SUM(payout), 0) as total_payout,
-            COALESCE(SUM(amount), 0) as total_deployed
+            COALESCE(SUM(amount), 0) as total_deployed,
+            COALESCE(SUM(CASE WHEN result='pending' THEN amount ELSE 0 END), 0) as pending_locked
         FROM bets
     """)
     stats = dict(c.fetchone())
@@ -68,6 +103,82 @@ def api_stats():
     c.execute("SELECT paper FROM bets ORDER BY id DESC LIMIT 1")
     last_bet = c.fetchone()
     stats["mode"] = "paper" if (not last_bet or last_bet["paper"]) else "live"
+    
+    # Calculate position value from pending bets
+    # Position value = SUM(shares × current_market_price)
+    # shares = size (already calculated as amount/price when bet was placed)
+    c.execute("""
+        SELECT token_id, size, price
+        FROM bets 
+        WHERE result='pending'
+    """)
+    pending_bets = c.fetchall()
+    
+    position_value = 0.0
+    try:
+        from py_clob_client.client import ClobClient
+        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+        import os
+        from dotenv import load_dotenv
+        load_dotenv()
+        
+        clob_client = ClobClient('https://clob.polymarket.com', key=os.getenv('POLYGON_PRIVATE_KEY'), chain_id=137)
+        clob_client.set_api_creds(clob_client.create_or_derive_api_creds())
+        
+        for bet in pending_bets:
+            token_id = bet["token_id"]
+            shares = bet["size"]  # shares owned
+            
+            # Try to get current price from CLOB orderbook
+            try:
+                orderbook = clob_client.get_order_book(token_id)
+                if orderbook and 'bids' in orderbook and len(orderbook['bids']) > 0:
+                    # Use best bid price (what we could sell for)
+                    current_price = float(orderbook['bids'][0][0])
+                elif orderbook and 'asks' in orderbook and len(orderbook['asks']) > 0:
+                    # Fallback to ask price if no bids
+                    current_price = float(orderbook['asks'][0][0])
+                else:
+                    # Fallback to entry price
+                    current_price = bet["price"]
+            except:
+                # Fallback to entry price if can't fetch
+                current_price = bet["price"]
+            
+            # Position value = shares × current_price
+            position_value += shares * current_price
+    except Exception as e:
+        # Fallback: use size × entry price if CLOB unavailable
+        c.execute("SELECT COALESCE(SUM(size * price), 0) as position_value FROM bets WHERE result='pending'")
+        position_row = c.fetchone()
+        position_value = float(position_row["position_value"]) if position_row and position_row["position_value"] else 0.0
+    
+    stats["position_value"] = position_value
+    
+    # Get current CLOB cash balance
+    try:
+        from py_clob_client.client import ClobClient
+        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+        import os
+        from dotenv import load_dotenv
+        load_dotenv()
+        
+        client = ClobClient('https://clob.polymarket.com', key=os.getenv('POLYGON_PRIVATE_KEY'), chain_id=137)
+        client.set_api_creds(client.create_or_derive_api_creds())
+        params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=0)
+        balance_info = client.get_balance_allowance(params)
+        stats["current_cash"] = float(balance_info.get('balance', 0)) / 1e6
+    except Exception as e:
+        stats["current_cash"] = 0.0
+    
+    # Calculate total portfolio value
+    stats["total_portfolio"] = stats["current_cash"] + stats["position_value"]
+    
+    # Starting balance
+    starting_balance = 90.0
+    stats["starting_balance"] = starting_balance
+    stats["net_pnl"] = stats["total_portfolio"] - starting_balance
+    
     conn.close()
     return stats
 
@@ -76,7 +187,11 @@ def api_stats():
 def api_windows(limit: int = 50):
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT * FROM windows ORDER BY id DESC LIMIT ?", (limit,))
+    # Handle both SQLite (?) and PostgreSQL (%s) parameter styles
+    if is_postgres(conn):
+        c.execute("SELECT * FROM windows ORDER BY id DESC LIMIT %s", (limit,))
+    else:
+        c.execute("SELECT * FROM windows ORDER BY id DESC LIMIT ?", (limit,))
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows
@@ -86,7 +201,11 @@ def api_windows(limit: int = 50):
 def api_bets(limit: int = 100):
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT * FROM bets ORDER BY id DESC LIMIT ?", (limit,))
+    # Handle both SQLite (?) and PostgreSQL (%s) parameter styles
+    if is_postgres(conn):
+        c.execute("SELECT * FROM bets ORDER BY id DESC LIMIT %s", (limit,))
+    else:
+        c.execute("SELECT * FROM bets ORDER BY id DESC LIMIT ?", (limit,))
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows
@@ -129,6 +248,104 @@ def api_equity_curve():
         })
     conn.close()
     return curve
+
+
+@app.get("/api/pnl-flow")
+def api_pnl_flow():
+    """Get complete P&L cash flow with running balance"""
+    conn = get_db()
+    c = conn.cursor()
+    
+    # Get all bets ordered by time
+    c.execute("""
+        SELECT id, placed_at, resolved_at, market_question, side,
+               amount, price, size, result, payout, profit, order_id
+        FROM bets 
+        ORDER BY placed_at ASC
+    """)
+    bets = c.fetchall()
+    
+    # Calculate cash flow
+    starting_balance = 90.0  # TODO: Make this configurable
+    flow = []
+    running_balance = starting_balance
+    total_profit = 0.0
+    
+    # Add starting balance entry
+    flow.append({
+        "id": None,
+        "date": None,
+        "type": "starting_balance",
+        "description": "Starting Balance",
+        "market": None,
+        "side": None,
+        "amount": None,
+        "payout": None,
+        "profit": None,
+        "balance": running_balance,
+        "result": None
+    })
+    
+    for bet in bets:
+        # Bet placed - debit
+        running_balance -= bet["amount"]
+        flow.append({
+            "id": bet["id"],
+            "date": bet["placed_at"],
+            "type": "bet_placed",
+            "description": f"Bet Placed: {bet['market_question'][:50]}",
+            "market": bet["market_question"],
+            "side": bet["side"],
+            "amount": bet["amount"],
+            "payout": None,
+            "profit": None,
+            "balance": running_balance,
+            "result": None,
+            "order_id": bet["order_id"]
+        })
+        
+        # If resolved, add payout
+        if bet["result"] != "pending" and bet["payout"]:
+            running_balance += bet["payout"]
+            total_profit += bet["profit"] or 0
+            flow.append({
+                "id": bet["id"],
+                "date": bet["resolved_at"],
+                "type": "settlement",
+                "description": f"Settled: {bet['market_question'][:50]}",
+                "market": bet["market_question"],
+                "side": bet["side"],
+                "amount": None,
+                "payout": bet["payout"],
+                "profit": bet["profit"],
+                "balance": running_balance,
+                "result": bet["result"],
+                "order_id": bet["order_id"]
+            })
+    
+    # Calculate EXACT net P&L from balance change (includes pending bets impact)
+    # This is the REAL P&L: what you actually have vs what you started with
+    actual_net_pnl = running_balance - starting_balance
+    
+    # Also calculate settled P&L (for reference)
+    c.execute("SELECT COALESCE(SUM(profit), 0) as settled_pnl FROM bets WHERE result != 'pending'")
+    settled_pnl_row = c.fetchone()
+    settled_pnl = float(settled_pnl_row["settled_pnl"]) if settled_pnl_row and settled_pnl_row["settled_pnl"] is not None else 0.0
+    
+    # Pending bets amount (unrealized)
+    c.execute("SELECT COALESCE(SUM(amount), 0) as pending_amount FROM bets WHERE result = 'pending'")
+    pending_row = c.fetchone()
+    pending_amount = float(pending_row["pending_amount"]) if pending_row and pending_row["pending_amount"] is not None else 0.0
+    
+    conn.close()
+    return {
+        "starting_balance": starting_balance,
+        "current_balance": running_balance,
+        "net_pnl": actual_net_pnl,  # REAL P&L: balance change (includes pending impact)
+        "settled_pnl": settled_pnl,  # Settled bets P&L only
+        "pending_amount": pending_amount,  # Amount locked in pending bets
+        "flow": flow
+    }
 
 
 @app.get("/api/scan")
@@ -232,6 +449,183 @@ def api_scan():
 
 # ─── Dashboard HTML ────────────────────────────────────────────
 
+@app.get("/pnl", response_class=HTMLResponse)
+def pnl_page():
+    """P&L Cash Flow page"""
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>P&L Flow — Vig Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0a0b0e; --surface: #12131a; --surface2: #1a1c25;
+  --border: #252833; --text: #e4e6ed; --text-dim: #6b7084;
+  --green: #00e676; --green-dim: rgba(0,230,118,0.12);
+  --red: #ff5252; --red-dim: rgba(255,82,82,0.12);
+  --amber: #ffd740; --amber-dim: rgba(255,215,64,0.12);
+  --blue: #448aff; --blue-dim: rgba(68,138,255,0.12);
+  --cyan: #18ffff; --cyan-dim: rgba(24,255,255,0.12);
+  --font-mono: 'JetBrains Mono', monospace;
+  --font-display: 'Space Grotesk', sans-serif;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:var(--bg); color:var(--text); font-family:var(--font-mono); font-size:13px; line-height:1.5; min-height:100vh; }
+.header { display:flex; align-items:center; justify-content:space-between; padding:16px 24px; border-bottom:1px solid var(--border); background:var(--surface); }
+.logo { font-family:var(--font-display); font-size:22px; font-weight:700; letter-spacing:-0.5px; }
+.logo span { color:var(--green); }
+.logo a { color:inherit; text-decoration:none; }
+.container { padding:20px 24px; max-width:1600px; margin:0 auto; }
+.summary { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:24px; }
+.card { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:16px 20px; }
+.card-title { font-size:11px; text-transform:uppercase; letter-spacing:1px; color:var(--text-dim); font-weight:500; margin-bottom:8px; }
+.card-value { font-family:var(--font-display); font-size:24px; font-weight:700; letter-spacing:-1px; }
+.card-value.positive { color:var(--green); }
+.card-value.negative { color:var(--red); }
+.table-container { background:var(--surface); border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+table { width:100%; border-collapse:collapse; }
+thead { background:var(--surface2); }
+th { text-align:left; padding:12px 16px; font-size:11px; text-transform:uppercase; letter-spacing:0.5px; color:var(--text-dim); font-weight:500; border-bottom:1px solid var(--border); }
+td { padding:12px 16px; border-bottom:1px solid var(--border); font-size:12px; }
+tr:hover { background:var(--surface2); }
+.tag { display:inline-block; padding:2px 8px; border-radius:4px; font-size:10px; font-weight:500; text-transform:uppercase; }
+.tag.won { background:var(--green-dim); color:var(--green); }
+.tag.lost { background:var(--red-dim); color:var(--red); }
+.tag.pending { background:var(--amber-dim); color:var(--amber); }
+.tag.yes { background:var(--blue-dim); color:var(--blue); }
+.tag.no { background:var(--cyan-dim); color:var(--cyan); }
+.type-bet { color:var(--red); }
+.type-settlement { color:var(--green); }
+.type-starting { color:var(--text-dim); }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="logo"><a href="/">Vig <span>Dashboard</span></a> → P&L Flow</div>
+  <div id="lastUpdate">Loading...</div>
+</div>
+<div class="container">
+  <div class="summary">
+    <div class="card">
+      <div class="card-title">Starting Balance</div>
+      <div class="card-value" id="startBalance">--</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Current Balance</div>
+      <div class="card-value" id="currentBalance">--</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Total Deployed</div>
+      <div class="card-value" id="totalDeployed">--</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Net P&L</div>
+      <div class="card-value" id="netPnl">--</div>
+    </div>
+  </div>
+  <div class="table-container">
+    <table>
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Side</th>
+          <th>Amount</th>
+          <th>Payout</th>
+          <th>Profit</th>
+          <th>Balance</th>
+        </tr>
+      </thead>
+      <tbody id="flowTable"></tbody>
+    </table>
+  </div>
+</div>
+<script>
+async function fetchJSON(path) {
+  const r=await fetch(path);
+  if(!r.ok) throw new Error(r.statusText);
+  return r.json();
+}
+
+function fmt(n) {
+  if(n===null||n===undefined) return '--';
+  const v=parseFloat(n);
+  if(isNaN(v)) return '--';
+  return (v>=0?'+':'')+'$'+v.toFixed(2);
+}
+
+function formatDate(d) {
+  if(!d) return '--';
+  const dt=new Date(d);
+  return dt.toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+}
+
+async function refresh() {
+  try {
+    const data=await fetchJSON('/api/pnl-flow');
+    const {starting_balance,current_balance,flow}=data;
+    
+    document.getElementById('startBalance').textContent=fmt(starting_balance);
+    document.getElementById('currentBalance').textContent=fmt(current_balance);
+    document.getElementById('currentBalance').className='card-value '+(current_balance>=starting_balance?'positive':'negative');
+    
+    let totalDeployed=0;
+    let netPnl=0;
+    let html='';
+    
+    for(const f of flow) {
+      if(f.type==='starting_balance') {
+        html+=`<tr style="background:var(--surface2);">
+          <td colspan="7"><strong>Starting Balance</strong></td>
+          <td><strong>${fmt(f.balance)}</strong></td>
+        </tr>`;
+      } else if(f.type==='bet_placed') {
+        totalDeployed+=f.amount||0;
+        html+=`<tr>
+          <td>${formatDate(f.date)}</td>
+          <td><span class="type-bet">BET</span></td>
+          <td title="${f.market||''}">${(f.market||'').substring(0,50)}${(f.market||'').length>50?'...':''}</td>
+          <td><span class="tag ${f.side==='YES'?'yes':'no'}">${f.side||'--'}</span></td>
+          <td class="type-bet">${fmt(-(f.amount||0))}</td>
+          <td>--</td>
+          <td>--</td>
+          <td>${fmt(f.balance)}</td>
+        </tr>`;
+      } else if(f.type==='settlement') {
+        netPnl+=f.profit||0;
+        html+=`<tr>
+          <td>${formatDate(f.date)}</td>
+          <td><span class="type-settlement">SETTLE</span></td>
+          <td title="${f.market||''}">${(f.market||'').substring(0,50)}${(f.market||'').length>50?'...':''}</td>
+          <td><span class="tag ${f.side==='YES'?'yes':'no'}">${f.side||'--'}</span></td>
+          <td>--</td>
+          <td class="type-settlement">${fmt(f.payout)}</td>
+          <td class="${(f.profit||0)>=0?'positive':'negative'}">${fmt(f.profit)}</td>
+          <td>${fmt(f.balance)}</td>
+        </tr>`;
+      }
+    }
+    
+    document.getElementById('flowTable').innerHTML=html;
+    document.getElementById('totalDeployed').textContent=fmt(totalDeployed);
+    document.getElementById('netPnl').textContent=fmt(netPnl);
+    document.getElementById('netPnl').className='card-value '+(netPnl>=0?'positive':'negative');
+    document.getElementById('lastUpdate').textContent='Updated '+new Date().toLocaleTimeString();
+  } catch(e) {
+    console.error('Refresh error:',e);
+    document.getElementById('lastUpdate').textContent='Error: '+e.message;
+  }
+}
+
+refresh();setInterval(refresh,30000);
+</script>
+</body>
+</html>"""
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     return """<!DOCTYPE html>
@@ -259,6 +653,15 @@ body { background:var(--bg); color:var(--text); font-family:var(--font-mono); fo
 .header-left { display:flex; align-items:center; gap:16px; }
 .logo { font-family:var(--font-display); font-size:22px; font-weight:700; letter-spacing:-0.5px; }
 .logo span { color:var(--green); }
+.logo a { color:inherit; text-decoration:none; }
+.nav-link { color:var(--text-dim); text-decoration:none; font-size:12px; padding:4px 12px; border-radius:4px; transition:all 0.2s; }
+.nav-link:hover { background:var(--surface2); color:var(--text); }
+.tabs { display:flex; gap:8px; margin-bottom:20px; border-bottom:1px solid var(--border); }
+.tab { padding:10px 20px; font-size:12px; font-weight:500; color:var(--text-dim); cursor:pointer; border-bottom:2px solid transparent; transition:all 0.2s; text-transform:uppercase; letter-spacing:0.5px; }
+.tab:hover { color:var(--text); }
+.tab.active { color:var(--cyan); border-bottom-color:var(--cyan); }
+.tab-content { display:none; }
+.tab-content.active { display:block; }
 .status-badge { display:inline-flex; align-items:center; gap:6px; padding:4px 12px; border-radius:20px; font-size:11px; font-weight:500; text-transform:uppercase; letter-spacing:0.5px; }
 .status-badge.paper { background:var(--amber-dim); color:var(--amber); }
 .status-badge.live { background:var(--green-dim); color:var(--green); }
@@ -325,7 +728,8 @@ canvas { width:100%!important; height:100%!important; }
 <body>
 <div class="header">
   <div class="header-left">
-    <div class="logo">V<span>ig</span></div>
+    <div class="logo"><a href="/" style="color:inherit;text-decoration:none;">V<span>ig</span></a></div>
+    <a href="/pnl" class="nav-link">P&L Flow</a>
     <div class="status-badge offline" id="statusBadge"><div class="status-dot"></div><span id="statusText">Loading...</span></div>
   </div>
   <div class="header-right">
@@ -335,9 +739,28 @@ canvas { width:100%!important; height:100%!important; }
 </div>
 <div class="container">
 
+  <!-- Tabs -->
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('overview')">Overview</div>
+    <div class="tab" onclick="switchTab('pnl')">P&L Flow</div>
+  </div>
+
+  <!-- Overview Tab -->
+  <div id="overviewTab" class="tab-content active">
+  <!-- Balance Overview -->
+  <div class="card" style="margin-bottom:16px">
+    <div class="card-header"><div class="card-title">Portfolio Balance</div></div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-top:12px">
+      <div><div class="card-sub">Available Cash</div><div class="card-value" id="currentCash">--</div></div>
+      <div><div class="card-sub">Position Value</div><div class="card-value" id="positionValue">--</div></div>
+      <div><div class="card-sub">Total Portfolio</div><div class="card-value" id="totalPortfolio">--</div></div>
+      <div><div class="card-sub">Net P&L</div><div class="card-value" id="netPnl">--</div></div>
+    </div>
+  </div>
+
   <!-- Stats Row -->
   <div class="grid grid-4">
-    <div class="card"><div class="card-title">Total P&L</div><div class="card-value" id="totalPnl">--</div><div class="card-sub" id="totalPnlSub"></div></div>
+    <div class="card"><div class="card-title">Realized P&L</div><div class="card-value" id="totalPnl">--</div><div class="card-sub" id="totalPnlSub"></div></div>
     <div class="card"><div class="card-title">Win Rate</div><div class="card-value" id="winRate">--</div><div class="card-sub" id="winRateSub"></div></div>
     <div class="card"><div class="card-title">Total Pocketed</div><div class="card-value positive" id="pocketed">--</div><div class="card-sub" id="pocketedSub"></div></div>
     <div class="card"><div class="card-title">Windows</div><div class="card-value" id="totalWindows">--</div><div class="card-sub" id="windowsSub"></div></div>
@@ -389,12 +812,112 @@ canvas { width:100%!important; height:100%!important; }
     <div class="card"><div class="card-header"><div class="card-title">Recent Windows</div></div><div class="table-wrap" id="windowsTable"><div class="empty"><div class="empty-icon">&#9678;</div><div>No windows yet</div></div></div></div>
     <div class="card"><div class="card-header"><div class="card-title">Recent Bets</div></div><div class="table-wrap" id="betsTable"><div class="empty"><div class="empty-icon">&#9678;</div><div>No bets yet</div></div></div></div>
   </div>
+  </div>
 
+  <!-- P&L Flow Tab -->
+  <div id="pnlTab" class="tab-content">
+    <div class="grid grid-3" style="margin-bottom:20px">
+      <div class="card"><div class="card-title">Starting Balance</div><div class="card-value" id="pnlStartBalance">--</div></div>
+      <div class="card"><div class="card-title">Current Balance</div><div class="card-value" id="pnlCurrentBalance">--</div></div>
+      <div class="card"><div class="card-title">Net P&L</div><div class="card-value" id="pnlNetPnl">--</div></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title">Cash Flow</div></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Type</th>
+              <th>Market</th>
+              <th>Side</th>
+              <th>Amount</th>
+              <th>Payout</th>
+              <th>Profit</th>
+              <th>Balance</th>
+            </tr>
+          </thead>
+          <tbody id="pnlFlowTable">
+            <tr><td colspan="8" class="empty">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script>
 let equityChart=null;
+
+function switchTab(tabName) {
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
+  event.target.classList.add('active');
+  document.getElementById(tabName+'Tab').classList.add('active');
+  if(tabName==='pnl') loadPnlFlow();
+}
+
+async function loadPnlFlow() {
+  try {
+    const data=await fetchJSON('/api/pnl-flow');
+    if(!data || !data.flow) {
+      document.getElementById('pnlFlowTable').innerHTML='<tr><td colspan="8" class="empty">No data available</td></tr>';
+      return;
+    }
+    
+    document.getElementById('pnlStartBalance').textContent=fmt(data.starting_balance);
+    // Show total portfolio (cash + positions) not just cash balance
+    const totalPortfolio=(data.total_portfolio||0)||((data.current_cash||0)+(data.position_value||0));
+    document.getElementById('pnlCurrentBalance').textContent=fmt(totalPortfolio);
+    // Net P&L = total portfolio - starting balance
+    const netPnl=data.net_pnl_total!==undefined?data.net_pnl_total:(totalPortfolio-data.starting_balance);
+    const pnlEl=document.getElementById('pnlNetPnl');
+    pnlEl.textContent=fmt(netPnl);
+    pnlEl.className='card-value '+(netPnl>=0?'positive':'negative');
+    
+    let html='';
+    if(!data.flow || data.flow.length===0) {
+      html='<tr><td colspan="8" class="empty">No transactions yet</td></tr>';
+    } else {
+      for(const f of data.flow) {
+      const date=f.date?new Date(f.date).toLocaleString():'--';
+      let type='',amount='',payout='',profit='',balance='',side='';
+      
+      if(f.type==='starting_balance') {
+        type='<span class="tag growth">START</span>';
+        balance='<span class="positive">'+fmt(f.balance)+'</span>';
+      } else if(f.type==='bet_placed') {
+        type='<span class="tag pending">BET</span>';
+        amount='<span class="negative">-'+fmt(f.amount)+'</span>';
+        balance=fmt(f.balance);
+        side=f.side||'--';
+      } else if(f.type==='settlement') {
+        type='<span class="tag '+(f.result==='won'?'won':'lost')+'">SETTLE</span>';
+        payout='<span class="positive">+'+fmt(f.payout)+'</span>';
+        profit='<span class="'+(f.profit>=0?'positive':'negative')+'">'+fmt(f.profit)+'</span>';
+        balance='<span class="'+(f.balance>=0?'positive':'negative')+'">'+fmt(f.balance)+'</span>';
+        side=f.side||'--';
+      }
+      
+      const market=(f.market||'').substring(0,35)+((f.market||'').length>35?'...':'');
+      html+='<tr>';
+      html+='<td>'+date+'</td>';
+      html+='<td>'+type+'</td>';
+      html+='<td title="'+(f.market||'')+'">'+market+'</td>';
+      html+='<td>'+side+'</td>';
+      html+='<td>'+amount+'</td>';
+      html+='<td>'+payout+'</td>';
+      html+='<td>'+profit+'</td>';
+      html+='<td>'+balance+'</td>';
+      html+='</tr>';
+      }
+    }
+    document.getElementById('pnlFlowTable').innerHTML=html;
+  } catch(e) {
+    document.getElementById('pnlFlowTable').innerHTML='<tr><td colspan="8" class="empty">Error: '+e.message+'</td></tr>';
+  }
+}
 let lastWindowAt=null;
 
 async function fetchJSON(u){try{const r=await fetch(u);return await r.json()}catch(e){return null}}
@@ -472,10 +995,23 @@ async function refresh(){
   if(stats&&stats.last_window_at) lastWindowAt=stats.last_window_at;
 
   if(stats){
-    const pnl=stats.total_profit||0;
-    document.getElementById('totalPnl').textContent=fmt(pnl);
-    document.getElementById('totalPnl').className='card-value '+(pnl>=0?'positive':'negative');
-    document.getElementById('totalPnlSub').textContent=(stats.total_bets||0)+' bets | $'+(stats.total_deployed||0).toFixed(0)+' deployed';
+  // Portfolio balance
+  const currentCash=stats.current_cash||0;
+  const positionValue=stats.position_value||0;
+  const totalPortfolio=stats.total_portfolio||0;
+  const netPnl=stats.net_pnl||0;
+  document.getElementById('currentCash').textContent=fmt(currentCash);
+  document.getElementById('positionValue').textContent=fmt(positionValue);
+  document.getElementById('totalPortfolio').textContent=fmt(totalPortfolio);
+  const netPnlEl=document.getElementById('netPnl');
+  netPnlEl.textContent=fmt(netPnl);
+  netPnlEl.className='card-value '+(netPnl>=0?'positive':'negative');
+  
+  // Realized P&L (settled bets only)
+  const pnl=stats.total_profit||0;
+  document.getElementById('totalPnl').textContent=fmt(pnl);
+  document.getElementById('totalPnl').className='card-value '+(pnl>=0?'positive':'negative');
+  document.getElementById('totalPnlSub').textContent=(stats.total_bets||0)+' bets | $'+(stats.total_deployed||0).toFixed(0)+' deployed';
     document.getElementById('winRate').textContent=(stats.win_rate||0).toFixed(1)+'%';
     document.getElementById('winRate').className='card-value '+(stats.win_rate>=85?'positive':stats.win_rate>=80?'neutral':'negative');
     document.getElementById('winRateSub').textContent=(stats.wins||0)+'W '+(stats.losses||0)+'L '+(stats.pending||0)+'P';
@@ -539,6 +1075,179 @@ async function refresh(){
 }
 
 refresh();setInterval(refresh,15000);
+</script>
+</body>
+</html>"""
+
+
+@app.get("/pnl", response_class=HTMLResponse)
+def pnl_page():
+    """P&L Cash Flow Table Page"""
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>P&L Cash Flow — Vig Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0a0b0e; --surface: #12131a; --surface2: #1a1c25;
+  --border: #252833; --text: #e4e6ed; --text-dim: #6b7084;
+  --green: #00e676; --green-dim: rgba(0,230,118,0.12);
+  --red: #ff5252; --red-dim: rgba(255,82,82,0.12);
+  --amber: #ffd740; --amber-dim: rgba(255,215,64,0.12);
+  --blue: #448aff; --blue-dim: rgba(68,138,255,0.12);
+  --cyan: #18ffff; --cyan-dim: rgba(24,255,255,0.12);
+  --font-mono: 'JetBrains Mono', monospace;
+  --font-display: 'Space Grotesk', sans-serif;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:var(--bg); color:var(--text); font-family:var(--font-mono); font-size:13px; line-height:1.5; min-height:100vh; padding:20px; }
+.header { display:flex; align-items:center; justify-content:space-between; margin-bottom:24px; padding-bottom:16px; border-bottom:1px solid var(--border); }
+.header h1 { font-family:var(--font-display); font-size:24px; font-weight:700; }
+.header a { color:var(--cyan); text-decoration:none; font-size:12px; }
+.header a:hover { text-decoration:underline; }
+.summary { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; margin-bottom:24px; }
+.summary-card { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:16px; }
+.summary-label { font-size:11px; text-transform:uppercase; color:var(--text-dim); margin-bottom:8px; }
+.summary-value { font-family:var(--font-display); font-size:24px; font-weight:700; }
+.summary-value.positive { color:var(--green); }
+.summary-value.negative { color:var(--red); }
+.table-container { background:var(--surface); border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+table { width:100%; border-collapse:collapse; }
+thead { background:var(--surface2); }
+th { text-align:left; padding:12px 16px; font-size:11px; text-transform:uppercase; color:var(--text-dim); font-weight:600; border-bottom:1px solid var(--border); }
+td { padding:12px 16px; border-bottom:1px solid var(--border); font-size:12px; }
+tbody tr:hover { background:var(--surface2); }
+.type-badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:10px; font-weight:500; text-transform:uppercase; }
+.type-badge.starting { background:var(--blue-dim); color:var(--blue); }
+.type-badge.bet { background:var(--amber-dim); color:var(--amber); }
+.type-badge.settlement { background:var(--green-dim); color:var(--green); }
+.result-badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:10px; font-weight:500; }
+.result-badge.won { background:var(--green-dim); color:var(--green); }
+.result-badge.lost { background:var(--red-dim); color:var(--red); }
+.result-badge.pending { background:var(--amber-dim); color:var(--amber); }
+.amount { font-weight:500; }
+.amount.debit { color:var(--red); }
+.amount.credit { color:var(--green); }
+.balance { font-weight:600; font-family:var(--font-display); }
+.balance.positive { color:var(--green); }
+.balance.negative { color:var(--red); }
+.market { max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.loading { text-align:center; padding:40px; color:var(--text-dim); }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>P&L Cash Flow</h1>
+  <a href="/">← Back to Dashboard</a>
+</div>
+
+<div class="summary" id="summary">
+  <div class="summary-card">
+    <div class="summary-label">Starting Balance</div>
+    <div class="summary-value" id="startBalance">--</div>
+  </div>
+  <div class="summary-card">
+    <div class="summary-label">Current Balance</div>
+    <div class="summary-value" id="currentBalance">--</div>
+  </div>
+  <div class="summary-card">
+    <div class="summary-label">Net P&L</div>
+    <div class="summary-value" id="netPnl">--</div>
+  </div>
+</div>
+
+<div class="table-container">
+  <table>
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Type</th>
+        <th>Market</th>
+        <th>Side</th>
+        <th>Amount</th>
+        <th>Payout</th>
+        <th>Profit</th>
+        <th>Balance</th>
+      </tr>
+    </thead>
+    <tbody id="flowTable">
+      <tr><td colspan="8" class="loading">Loading cash flow data...</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<script>
+function fmt(n) {
+  if(n===null||n===undefined)return'--';
+  const v=parseFloat(n);
+  if(isNaN(v))return'--';
+  return(v>=0?'+':'')+'$'+v.toFixed(2);
+}
+
+function formatDate(d) {
+  if(!d)return'--';
+  try{return new Date(d).toLocaleString();}catch{return d;}
+}
+
+async function loadFlow() {
+  try {
+    const res=await fetch('/api/pnl-flow');
+    const data=await res.json();
+    
+    // Update summary
+    document.getElementById('startBalance').textContent=fmt(data.starting_balance);
+    document.getElementById('currentBalance').textContent=fmt(data.current_balance);
+    const netPnl=data.current_balance-data.starting_balance;
+    const pnlEl=document.getElementById('netPnl');
+    pnlEl.textContent=fmt(netPnl);
+    pnlEl.className='summary-value '+(netPnl>=0?'positive':'negative');
+    
+    // Build table
+    let html='';
+    for(const f of data.flow) {
+      const date=formatDate(f.date);
+      let typeBadge='',amount='',payout='',profit='',balance='';
+      
+      if(f.type==='starting_balance') {
+        typeBadge='<span class="type-badge starting">START</span>';
+        balance='<span class="balance positive">'+fmt(f.balance)+'</span>';
+      } else if(f.type==='bet_placed') {
+        typeBadge='<span class="type-badge bet">BET</span>';
+        amount='<span class="amount debit">-'+fmt(f.amount)+'</span>';
+        balance='<span class="balance">'+fmt(f.balance)+'</span>';
+      } else if(f.type==='settlement') {
+        typeBadge='<span class="type-badge settlement">SETTLE</span>';
+        payout='<span class="amount credit">+'+fmt(f.payout)+'</span>';
+        profit='<span class="amount '+(f.profit>=0?'credit':'debit')+'">'+fmt(f.profit)+'</span>';
+        balance='<span class="balance '+(f.balance>=0?'positive':'negative')+'">'+fmt(f.balance)+'</span>';
+      }
+      
+      const resultBadge=f.result?('<span class="result-badge '+f.result+'">'+f.result.toUpperCase()+'</span>'):'';
+      const market=(f.market||'').substring(0,40)+((f.market||'').length>40?'...':'');
+      
+      html+='<tr>';
+      html+='<td>'+date+'</td>';
+      html+='<td>'+typeBadge+'</td>';
+      html+='<td class="market" title="'+(f.market||'')+'">'+market+'</td>';
+      html+='<td>'+(f.side||'--')+'</td>';
+      html+='<td>'+amount+'</td>';
+      html+='<td>'+payout+'</td>';
+      html+='<td>'+profit+'</td>';
+      html+='<td>'+balance+'</td>';
+      html+='</tr>';
+    }
+    
+    document.getElementById('flowTable').innerHTML=html;
+  } catch(e) {
+    document.getElementById('flowTable').innerHTML='<tr><td colspan="8" class="loading">Error loading data: '+e.message+'</td></tr>';
+  }
+}
+
+loadFlow();
+setInterval(loadFlow,30000);
 </script>
 </body>
 </html>"""

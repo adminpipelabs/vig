@@ -54,9 +54,9 @@ class BetManager:
             size = clip / market.fav_price
             bet = BetRecord(
                 window_id=window_id, platform="polymarket",
-                market_id=market.market_id, market_question=market.question,
-                token_id=market.fav_token_id, side=market.fav_side,
-                price=market.fav_price, amount=clip, size=size,
+                market_id=market.market_id, condition_id=market.condition_id,
+                market_question=market.question, token_id=market.fav_token_id,
+                side=market.fav_side, price=market.fav_price, amount=clip, size=size,
                 placed_at=datetime.now(timezone.utc).isoformat(),
                 result="pending", paper=self.config.paper_mode,
             )
@@ -113,6 +113,13 @@ class BetManager:
                 continue
 
             profit = payout - bet.amount if result == "won" else -bet.amount
+            
+            # If won, try to sell the position to convert shares back to cash
+            if result == "won" and not self.config.paper_mode and self.clob_client:
+                sell_success = self._sell_winning_position(bet)
+                if not sell_success:
+                    logger.warning(f"  ⚠️  Could not sell winning position for bet {bet.id} - shares may need manual redemption")
+            
             self.db.update_bet_result(bet.id, result, payout, profit)
 
             if result == "won":
@@ -191,3 +198,55 @@ class BetManager:
             import traceback
             logger.error(traceback.format_exc())
             return "pending", 0.0
+
+    def _sell_winning_position(self, bet):
+        """
+        Attempt to sell winning position back to market to convert shares to cash.
+        Returns True if successful, False otherwise.
+        """
+        if not bet.token_id:
+            logger.warning(f"[SELL] Bet {bet.id} has no token_id - cannot sell")
+            return False
+        
+        try:
+            from py_clob_client.clob_types import OrderArgs, OrderType
+            from py_clob_client.order_builder.constants import SELL
+            
+            # Calculate shares owned
+            shares = bet.size / bet.price if bet.price > 0 else 0
+            if shares <= 0:
+                logger.warning(f"[SELL] Bet {bet.id} has invalid shares calculation")
+                return False
+            
+            logger.info(f"[SELL] Attempting to sell {shares:.2f} shares for bet {bet.id}")
+            
+            # Try selling at 0.99 (should fill at market price ~$1.00 for resolved markets)
+            # Use FOK (Fill-or-Kill) for immediate execution
+            order = self.clob_client.create_order(OrderArgs(
+                token_id=bet.token_id,
+                price=0.99,
+                size=round(shares, 2),
+                side=SELL
+            ))
+            
+            response = self.clob_client.post_order(order, OrderType.FOK)
+            
+            # Check if order was successful
+            if isinstance(response, dict):
+                order_id = response.get('orderID') or response.get('id')
+                if order_id:
+                    logger.info(f"[SELL] ✅ Successfully placed sell order {order_id} for bet {bet.id}")
+                    return True
+                else:
+                    logger.warning(f"[SELL] ⚠️  Sell order response unclear: {response}")
+                    return False
+            else:
+                # Response might be a string order ID
+                logger.info(f"[SELL] ✅ Sell order placed: {response}")
+                return True
+                
+        except Exception as e:
+            # Don't fail the settlement if sell fails - log and continue
+            # The position might be on a closed market that needs redemption instead
+            logger.warning(f"[SELL] ❌ Could not sell position for bet {bet.id}: {e}")
+            return False

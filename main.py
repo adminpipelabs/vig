@@ -126,6 +126,7 @@ def main():
 
             if not candidates:
                 logger.info("No qualifying markets found. Waiting for next window.")
+                # Continue to finally block for sleep
                 continue
 
             # 3. Place bets FIRST (before creating window record)
@@ -135,6 +136,7 @@ def main():
 
             if not bets:
                 logger.info("No bets placed (all filtered out).")
+                # Continue to finally block for sleep
                 continue
 
             # 4. Create window record ONLY after confirming bets will be placed
