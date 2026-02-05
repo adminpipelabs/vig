@@ -1,5 +1,10 @@
 .env
+.env.save
+*.db
 vig.db
+vig_paper.db
 vig.log
 __pycache__/
 *.pyc
+*.py~
+.DS_Store

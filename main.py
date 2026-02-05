@@ -66,15 +66,26 @@ def main():
     clob_client = None
     if not config.paper_mode:
         try:
-            from py_clob_client.client import ClobClient
-            # EOA initialization — no funder, no signature_type for direct EOA wallets
-            host = config.clob_url
-            key = config.private_key
-            chain_id = config.chain_id
-            clob_client = ClobClient(host, key=key, chain_id=chain_id)
+            # Use proxy wrapper if RESIDENTIAL_PROXY_URL is set (for Railway deployment)
+            residential_proxy = os.getenv("RESIDENTIAL_PROXY_URL")
+            if residential_proxy:
+                from clob_proxy import get_clob_client_with_proxy
+                host = config.clob_url
+                key = config.private_key
+                chain_id = config.chain_id
+                clob_client = get_clob_client_with_proxy(host, key=key, chain_id=chain_id)
+                logger.info("CLOB client initialized with residential proxy")
+            else:
+                from py_clob_client.client import ClobClient
+                # EOA initialization — no funder, no signature_type for direct EOA wallets
+                host = config.clob_url
+                key = config.private_key
+                chain_id = config.chain_id
+                clob_client = ClobClient(host, key=key, chain_id=chain_id)
+                logger.info("CLOB client initialized (direct connection)")
+            
             creds = clob_client.create_or_derive_api_creds()
             clob_client.set_api_creds(creds)
-            logger.info("CLOB client initialized")
         except Exception as e:
             logger.error(f"Failed to init CLOB client: {e}")
             logger.error("Cannot run live mode without CLOB client")
@@ -271,10 +282,12 @@ def main():
             if running:
                 sleep_start = datetime.now(timezone.utc)
                 logger.info(f"[SLEEP] Sleeping {config.scan_interval_seconds}s at {sleep_start.strftime('%H:%M:%S')} UTC")
-                for _ in range(config.scan_interval_seconds):
-                    if not running:
-                        break
-                    time.sleep(1)
+                # Sleep in chunks to allow graceful shutdown
+                remaining = config.scan_interval_seconds
+                while remaining > 0 and running:
+                    sleep_chunk = min(remaining, 60)  # Check every 60 seconds
+                    time.sleep(sleep_chunk)
+                    remaining -= sleep_chunk
                 sleep_end = datetime.now(timezone.utc)
                 sleep_duration = (sleep_end - sleep_start).total_seconds()
                 logger.info(f"[SLEEP] Woke up at {sleep_end.strftime('%H:%M:%S')} UTC (slept {sleep_duration:.0f}s)")
