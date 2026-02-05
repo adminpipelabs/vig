@@ -101,18 +101,24 @@ sqlite_cur.execute("SELECT * FROM bets ORDER BY id")
 bets = sqlite_cur.fetchall()
 
 if bets:
+    # Convert Row objects to dicts for easier handling
+    bet_data = []
+    for b in bets:
+        bet_data.append((
+            b['window_id'], b['platform'], b['market_id'],
+            b['condition_id'] if 'condition_id' in b.keys() else '',
+            b['market_question'], b['token_id'], b['side'], b['price'], b['amount'], b['size'],
+            b['order_id'], b['placed_at'],
+            b['resolved_at'] if 'resolved_at' in b.keys() else None,
+            b['result'], b['payout'], b['profit'], bool(b['paper'])
+        ))
+    
     pg_cur.executemany("""
         INSERT INTO bets (window_id, platform, market_id, condition_id, market_question, token_id,
                           side, price, amount, size, order_id, placed_at, resolved_at,
                           result, payout, profit, paper)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    """, [
-        (b['window_id'], b['platform'], b['market_id'], b.get('condition_id', ''),
-         b['market_question'], b['token_id'], b['side'], b['price'], b['amount'], b['size'],
-         b['order_id'], b['placed_at'], b.get('resolved_at'), b['result'],
-         b['payout'], b['profit'], bool(b['paper']))
-        for b in bets
-    ])
+    """, bet_data)
     print(f"✅ Migrated {len(bets)} bets")
 else:
     print("⚠️  No bets to migrate")
@@ -123,16 +129,21 @@ sqlite_cur.execute("SELECT * FROM windows ORDER BY id")
 windows = sqlite_cur.fetchall()
 
 if windows:
+    window_data = []
+    for w in windows:
+        window_data.append((
+            w['started_at'],
+            w['ended_at'] if 'ended_at' in w.keys() else None,
+            w['bets_placed'], w['bets_won'], w['bets_lost'],
+            w['bets_pending'], w['deployed'], w['returned'], w['profit'], w['pocketed'],
+            w['clip_size'], w['phase']
+        ))
+    
     pg_cur.executemany("""
         INSERT INTO windows (started_at, ended_at, bets_placed, bets_won, bets_lost, bets_pending,
                              deployed, returned, profit, pocketed, clip_size, phase)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    """, [
-        (w['started_at'], w.get('ended_at'), w['bets_placed'], w['bets_won'], w['bets_lost'],
-         w['bets_pending'], w['deployed'], w['returned'], w['profit'], w['pocketed'],
-         w['clip_size'], w['phase'])
-        for w in windows
-    ])
+    """, window_data)
     print(f"✅ Migrated {len(windows)} windows")
 else:
     print("⚠️  No windows to migrate")
@@ -143,14 +154,20 @@ sqlite_cur.execute("SELECT * FROM circuit_breaker_log ORDER BY id")
 logs = sqlite_cur.fetchall()
 
 if logs:
+    log_data = []
+    for l in logs:
+        log_data.append((
+            l['triggered_at'],
+            l['reason'] if 'reason' in l.keys() else None,
+            l['clip_at_trigger'] if 'clip_at_trigger' in l.keys() else None,
+            l['resolved_at'] if 'resolved_at' in l.keys() else None,
+            l['action_taken'] if 'action_taken' in l.keys() else None
+        ))
+    
     pg_cur.executemany("""
         INSERT INTO circuit_breaker_log (triggered_at, reason, clip_at_trigger, resolved_at, action_taken)
         VALUES (%s, %s, %s, %s, %s)
-    """, [
-        (l['triggered_at'], l.get('reason'), l.get('clip_at_trigger'),
-         l.get('resolved_at'), l.get('action_taken'))
-        for l in logs
-    ])
+    """, log_data)
     print(f"✅ Migrated {len(logs)} circuit breaker logs")
 else:
     print("⚠️  No circuit breaker logs to migrate")

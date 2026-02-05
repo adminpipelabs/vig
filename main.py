@@ -54,7 +54,9 @@ def main():
     mode = "PAPER" if config.paper_mode else "LIVE"
     logger.info(f"=== Vig v1 Starting ({mode} mode) ===")
 
-    db = Database(config.db_path)
+    # Use PostgreSQL if DATABASE_URL is set, otherwise SQLite
+    database_url = os.getenv("DATABASE_URL")
+    db = Database(config.db_path, database_url=database_url)
     scanner = Scanner(config)
     snowball = Snowball(config)
     risk_mgr = RiskManager(config, db)

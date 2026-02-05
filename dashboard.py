@@ -58,6 +58,48 @@ def execute_query(conn, query, params=None):
 
 # ─── API Endpoints ─────────────────────────────────────────────
 
+@app.get("/api/wallet/balance")
+def api_wallet_balance():
+    """Get wallet balance - available funds and locked funds"""
+    conn = get_db()
+    c = conn.cursor()
+    
+    # Calculate locked funds from pending bets
+    c.execute("""
+        SELECT COALESCE(SUM(amount), 0) as locked_funds
+        FROM bets
+        WHERE result='pending'
+    """)
+    locked_funds = float(c.fetchone()["locked_funds"] or 0)
+    
+    # Get available balance from CLOB
+    available_balance = 0.0
+    try:
+        from py_clob_client.client import ClobClient
+        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+        import os
+        from dotenv import load_dotenv
+        load_dotenv()
+        
+        client = ClobClient('https://clob.polymarket.com', key=os.getenv('POLYGON_PRIVATE_KEY'), chain_id=137)
+        client.set_api_creds(client.create_or_derive_api_creds())
+        params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=0)
+        balance_info = client.get_balance_allowance(params)
+        available_balance = float(balance_info.get('balance', 0)) / 1e6
+    except Exception as e:
+        pass
+    
+    total_balance = available_balance + locked_funds
+    
+    conn.close()
+    return {
+        "available_balance": available_balance,
+        "locked_funds": locked_funds,
+        "total_balance": total_balance,
+        "currency": "USDC"
+    }
+
+
 @app.get("/api/stats")
 def api_stats():
     conn = get_db()
@@ -752,6 +794,8 @@ canvas { width:100%!important; height:100%!important; }
     <div class="card-header"><div class="card-title">Portfolio Balance</div></div>
     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-top:12px">
       <div><div class="card-sub">Available Cash</div><div class="card-value" id="currentCash">--</div></div>
+      <div><div class="card-sub">Locked Funds</div><div class="card-value" id="lockedFunds">--</div></div>
+      <div><div class="card-sub">Total Balance</div><div class="card-value" id="totalBalance">--</div></div>
       <div><div class="card-sub">Position Value</div><div class="card-value" id="positionValue">--</div></div>
       <div><div class="card-sub">Total Portfolio</div><div class="card-value" id="totalPortfolio">--</div></div>
       <div><div class="card-sub">Net P&L</div><div class="card-value" id="netPnl">--</div></div>
@@ -997,10 +1041,12 @@ async function refresh(){
   if(stats){
   // Portfolio balance
   const currentCash=stats.current_cash||0;
+  const lockedFunds=stats.pending_locked||0;
   const positionValue=stats.position_value||0;
   const totalPortfolio=stats.total_portfolio||0;
   const netPnl=stats.net_pnl||0;
   document.getElementById('currentCash').textContent=fmt(currentCash);
+  document.getElementById('lockedFunds').textContent=fmt(lockedFunds);
   document.getElementById('positionValue').textContent=fmt(positionValue);
   document.getElementById('totalPortfolio').textContent=fmt(totalPortfolio);
   const netPnlEl=document.getElementById('netPnl');
