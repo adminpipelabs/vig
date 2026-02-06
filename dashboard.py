@@ -11,6 +11,12 @@ from fastapi.responses import HTMLResponse, JSONResponse
 import httpx
 import logging
 
+# Configure logging first (before any logger usage)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s"
+)
+
 # Suppress verbose HTTP/2 and HPACK debug logs
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -43,8 +49,13 @@ def get_db():
             conn.row_factory = sqlite3.Row
             return conn
         except Exception as e:
-            logger.error(f"Failed to connect to PostgreSQL: {e}")
-            logger.warning("Falling back to SQLite")
+            # Use print for critical startup errors (logger might not be ready)
+            try:
+                logger.error(f"Failed to connect to PostgreSQL: {e}")
+                logger.warning("Falling back to SQLite")
+            except:
+                print(f"Warning: Failed to connect to PostgreSQL: {e}")
+                print("Falling back to SQLite")
             conn = sqlite3.connect(DB_PATH)
             conn.row_factory = sqlite3.Row
             return conn
