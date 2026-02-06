@@ -515,14 +515,54 @@ def api_bot_status():
 
 @app.post("/api/bot-control")
 def api_bot_control(action: str):
-    """Control bot (start/stop) - Note: On Railway, bot runs via Procfile"""
-    # On Railway, bot is managed by Procfile/railway.toml
-    # This endpoint is for future use or local development
-    return {
-        "status": "info",
-        "message": f"Bot control via Railway deployment. Use Railway dashboard to restart service.",
+    """Control bot (start/stop/restart)"""
+    import subprocess
+    import os
+    
+    result = {
+        "status": "success",
+        "message": "",
         "action": action
     }
+    
+    try:
+        if action == "restart":
+            # Try to restart via Railway CLI
+            railway_path = "/opt/homebrew/bin/railway"
+            if os.path.exists(railway_path):
+                try:
+                    # Run restart in background
+                    subprocess.Popen(
+                        [railway_path, "restart", "--yes"],
+                        cwd=os.getcwd(),
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE
+                    )
+                    result["message"] = "Bot restart initiated. This may take 30-60 seconds."
+                except Exception as e:
+                    result["status"] = "error"
+                    result["message"] = f"Could not restart via Railway CLI: {str(e)}. Please restart manually via Railway dashboard."
+            else:
+                result["status"] = "info"
+                result["message"] = "Railway CLI not found. Please restart manually via Railway dashboard at https://railway.app"
+        
+        elif action == "stop":
+            result["status"] = "info"
+            result["message"] = "To stop the bot, go to Railway dashboard → Service → Settings → Stop. Or set PAPER_MODE=true to pause trading."
+        
+        elif action == "start":
+            result["status"] = "info"
+            result["message"] = "To start the bot, go to Railway dashboard → Service → Settings → Start. The bot starts automatically on deployment."
+        
+        else:
+            result["status"] = "error"
+            result["message"] = f"Unknown action: {action}"
+    
+    except Exception as e:
+        result["status"] = "error"
+        result["message"] = f"Error: {str(e)}"
+    
+    return result
 
 
 @app.get("/api/scan")
@@ -977,16 +1017,29 @@ canvas { width:100%!important; height:100%!important; }
     <div class="table-wrap" id="pendingTable"></div>
   </div>
 
-  <!-- Bot Status Card -->
+  <!-- Bot Control Panel -->
   <div class="card" style="margin-bottom:16px">
     <div class="card-header">
-      <div class="card-title">Bot Status</div>
+      <div class="card-title">Bot Control</div>
       <div class="card-actions">
         <span class="status-badge" id="botStatusBadge">--</span>
       </div>
     </div>
     <div id="botStatusContent">
       <div class="empty">Loading bot status...</div>
+    </div>
+    <div id="botControlPanel" style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);display:none;">
+      <div class="bot-description" style="margin-bottom:16px;padding:12px;background:var(--surface2);border-radius:6px;font-size:12px;line-height:1.6;color:var(--text-dim);">
+        <strong style="color:var(--text);display:block;margin-bottom:8px;">About This Bot</strong>
+        <p style="margin:0 0 8px 0;">This bot automatically scans <strong>Polymarket</strong> every hour for expiring prediction markets. It identifies markets with favorable odds (70-90% favorite) and places bets using a snowball strategy that increases bet size after wins.</p>
+        <p style="margin:0;"><strong>Trading Windows:</strong> Every 60 minutes | <strong>Markets:</strong> Polymarket (future: additional exchanges) | <strong>Strategy:</strong> Snowball with circuit breakers</p>
+      </div>
+      <div class="bot-controls" style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn btn-cyan" id="restartBtn" onclick="controlBot('restart')" style="flex:1;min-width:120px;">🔄 Restart</button>
+        <button class="btn" id="stopBtn" onclick="controlBot('stop')" style="flex:1;min-width:120px;border-color:var(--red-dim);color:var(--red);">⏹ Stop</button>
+        <button class="btn" id="startBtn" onclick="controlBot('start')" style="flex:1;min-width:120px;border-color:var(--green-dim);color:var(--green);">▶ Start</button>
+      </div>
+      <div id="botControlMessage" style="margin-top:12px;padding:8px 12px;border-radius:6px;font-size:11px;display:none;"></div>
     </div>
   </div>
 
@@ -1280,17 +1333,40 @@ function updateBotStatus(status){
   if(!status)return;
   const badge=document.getElementById('botStatusBadge');
   const content=document.getElementById('botStatusContent');
+  const panel=document.getElementById('botControlPanel');
   
   const statusMap={
-    'running':{class:'status-badge live',text:'Running'},
-    'stopped':{class:'status-badge offline',text:'Stopped'},
-    'error':{class:'status-badge error',text:'Error'},
-    'unknown':{class:'status-badge offline',text:'Unknown'}
+    'running':{class:'status-badge live',text:'Running',icon:'🟢'},
+    'stopped':{class:'status-badge offline',text:'Stopped',icon:'🔴'},
+    'error':{class:'status-badge error',text:'Error',icon:'🟡'},
+    'unknown':{class:'status-badge offline',text:'Unknown',icon:'⚪'}
   };
   
   const s=statusMap[status.status]||statusMap['unknown'];
   badge.className=s.class;
-  badge.textContent=s.text;
+  badge.textContent=s.icon+' '+s.text;
+  
+  // Show control panel
+  panel.style.display='block';
+  
+  // Update button states
+  const restartBtn=document.getElementById('restartBtn');
+  const stopBtn=document.getElementById('stopBtn');
+  const startBtn=document.getElementById('startBtn');
+  
+  if(status.status==='running'){
+    restartBtn.disabled=false;
+    stopBtn.disabled=false;
+    startBtn.disabled=true;
+    startBtn.style.opacity='0.5';
+    stopBtn.style.opacity='1';
+  } else {
+    restartBtn.disabled=false;
+    stopBtn.disabled=true;
+    startBtn.disabled=false;
+    stopBtn.style.opacity='0.5';
+    startBtn.style.opacity='1';
+  }
   
   let html='<div class="bot-status-info">';
   html+='<div class="bot-activity"><strong>Activity:</strong> '+(status.activity||'Unknown')+'</div>';
@@ -1302,9 +1378,47 @@ function updateBotStatus(status){
   } else {
     html+='<div class="bot-last-window"><strong>Last Window:</strong> <span style="color:var(--text-dim)">No windows recorded yet</span></div>';
   }
-  html+='<div class="bot-note"><small>Bot scans Polymarket every hour for expiring markets. Future: Support for additional prediction exchanges.</small></div>';
   html+='</div>';
   content.innerHTML=html;
+}
+
+async function controlBot(action){
+  const btn=event.target;
+  const originalText=btn.textContent;
+  btn.disabled=true;
+  btn.textContent='Processing...';
+  
+  const messageEl=document.getElementById('botControlMessage');
+  messageEl.style.display='none';
+  
+  try{
+    const response=await fetch('/api/bot-control',{
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body:`action=${action}`
+    });
+    const result=await response.json();
+    
+    messageEl.textContent=result.message||'Action completed';
+    messageEl.style.display='block';
+    messageEl.style.background=result.status==='success'?'var(--green-dim)':result.status==='error'?'var(--red-dim)':'var(--amber-dim)';
+    messageEl.style.color=result.status==='success'?'var(--green)':result.status==='error'?'var(--red)':'var(--amber)';
+    
+    if(action==='restart'&&result.status==='success'){
+      // Refresh status after a delay
+      setTimeout(()=>{
+        location.reload();
+      },3000);
+    }
+  }catch(e){
+    messageEl.textContent='Error: '+e.message;
+    messageEl.style.display='block';
+    messageEl.style.background='var(--red-dim)';
+    messageEl.style.color='var(--red)';
+  }finally{
+    btn.disabled=false;
+    btn.textContent=originalText;
+  }
 }
 
 refresh();setInterval(refresh,15000);
