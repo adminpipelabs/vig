@@ -17,7 +17,7 @@ from snowball import Snowball
 from risk_manager import RiskManager
 from bet_manager import BetManager
 from notifier import Notifier
-from bot_status import update_bot_status
+# Bot status now handled via database heartbeat (db.update_bot_status)
 
 # Set log level from config (default to INFO for production)
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -152,8 +152,8 @@ def main():
             logger.info(f"WINDOW {window_count}")
             logger.info(f"{'='*50}")
             
-            # Update bot status: running
-            update_bot_status("running", f"Starting window {window_count}")
+            # Update bot heartbeat: starting window
+            db.update_bot_status("main", "scanning", f"Window {window_count}")
 
             # 1. Pre-window risk check
             alerts = risk_mgr.check_pre_window()
@@ -162,7 +162,7 @@ def main():
                     if a.level == "stop":
                         notifier.circuit_breaker(a.reason, a.action)
                 logger.error("Circuit breaker: STOP. Exiting.")
-                update_bot_status("stopped", "Circuit breaker triggered")
+                db.update_bot_status("main", "stopped", None, "Circuit breaker triggered")
                 break
 
             clip_multiplier = risk_mgr.get_clip_multiplier(alerts)
@@ -171,26 +171,25 @@ def main():
 
             # 2. Scan markets
             logger.info("Scanning Polymarket for expiring markets...")
-            update_bot_status("running", "Scanning Polymarket markets")
+            db.update_bot_status("main", "scanning", f"Window {window_count}")
             candidates = scanner.scan()
-            update_bot_status("running", f"Found {len(candidates)} qualifying markets", 
-                            datetime.now(timezone.utc).isoformat())
+            db.update_bot_status("main", "scanning", f"Window {window_count} - Found {len(candidates)} markets")
 
             if not candidates:
                 logger.info("No qualifying markets found. Waiting for next window.")
-                update_bot_status("running", "No qualifying markets found")
+                db.update_bot_status("main", "idle", f"Window {window_count} - No markets found")
                 # Continue to finally block for sleep
                 continue
 
             # 3. Place bets FIRST (before creating window record)
             logger.info(f"Placing bets on {len(candidates)} markets...")
-            update_bot_status("running", f"Placing bets on {len(candidates)} markets")
+            db.update_bot_status("main", "scanning", f"Window {window_count} - Placing bets")
             # Use window_count as temporary ID - will update after window creation
             bets = bet_mgr.place_bets(candidates, window_count, clip_multiplier)
 
             if not bets:
                 logger.info("No bets placed (all filtered out).")
-                update_bot_status("running", "No bets placed this window")
+                db.update_bot_status("main", "idle", f"Window {window_count} - No bets placed")
                 # Continue to finally block for sleep
                 continue
 
@@ -211,7 +210,7 @@ def main():
             total_deployed = sum(b.amount for b in bets)
             db.update_window(window_id, bets_placed=len(bets), deployed=total_deployed)
             logger.info(f"Placed {len(bets)} bets, ${total_deployed:.2f} deployed")
-            update_bot_status("running", f"Placed {len(bets)} bets, waiting for settlement")
+            db.update_bot_status("main", "scanning", f"Window {window_id} - {len(bets)} bets placed, waiting for settlement")
 
             # 5. Wait for settlement
             if config.paper_mode:
@@ -226,7 +225,7 @@ def main():
                     pending = db.get_pending_bets(window_id)
                     if not pending:
                         break
-                    update_bot_status("running", f"Waiting for {len(pending)} bets to settle")
+                    db.update_bot_status("main", "scanning", f"Window {window_id} - Waiting for {len(pending)} bets to settle")
                     time.sleep(check_interval)
                     elapsed += check_interval
                     if elapsed % 300 == 0:
@@ -234,7 +233,7 @@ def main():
 
             # 6. Settle bets
             logger.info("Settling bets...")
-            update_bot_status("running", "Settling bets")
+            db.update_bot_status("main", "scanning", f"Window {window_id} - Settling bets")
             # First settle bets from current window
             result = bet_mgr.settle_bets(window_id)
             
@@ -278,7 +277,7 @@ def main():
             returned = result.get("returned", 0)
 
             logger.info(f"Results: {wins}W {losses}L | Profit: ${window_profit:.2f}")
-            update_bot_status("running", f"Window {window_count} complete: {wins}W {losses}L")
+            db.update_bot_status("main", "idle", f"Window {window_id} complete: {wins}W {losses}L")
 
             # 7. Snowball
             sb_result = snowball.process_window(window_profit, len(bets))
@@ -323,13 +322,13 @@ def main():
             logger.error(f"[ERROR] Main loop error: {e}")
             import traceback
             logger.error(traceback.format_exc())
-            update_bot_status("error", f"Error: {str(e)[:50]}")
+            db.update_bot_status("main", "error", None, str(e)[:200])
         finally:
             # 11. Sleep until next window (guaranteed to run even on errors)
             if running:
                 sleep_start = datetime.now(timezone.utc)
                 logger.info(f"[SLEEP] Sleeping {config.scan_interval_seconds}s at {sleep_start.strftime('%H:%M:%S')} UTC")
-                update_bot_status("running", f"Sleeping until next scan ({config.scan_interval_seconds}s)")
+                db.update_bot_status("main", "idle", f"Sleeping {config.scan_interval_seconds}s until next scan")
                 # Sleep in chunks to allow graceful shutdown
                 remaining = config.scan_interval_seconds
                 while remaining > 0 and running:
@@ -342,7 +341,7 @@ def main():
 
     # Cleanup
     logger.info("Vig shutting down.")
-    update_bot_status("stopped", "Bot stopped")
+    db.update_bot_status("main", "stopped", None, "Bot stopped")
     scanner.close()
     db.close()
 

@@ -155,6 +155,16 @@ class Database:
                     resolved_at TEXT, action_taken TEXT
                 )
             """)
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS bot_status (
+                    id TEXT PRIMARY KEY,
+                    last_heartbeat TIMESTAMP,
+                    status TEXT,
+                    current_window TEXT,
+                    error_message TEXT,
+                    scan_count INTEGER DEFAULT 0
+                )
+            """)
         else:
             c.execute("""
                 CREATE TABLE IF NOT EXISTS windows (
@@ -172,6 +182,16 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     triggered_at TEXT, reason TEXT, clip_at_trigger REAL,
                     resolved_at TEXT, action_taken TEXT
+                )
+            """)
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS bot_status (
+                    id TEXT PRIMARY KEY,
+                    last_heartbeat TEXT,
+                    status TEXT,
+                    current_window TEXT,
+                    error_message TEXT,
+                    scan_count INTEGER DEFAULT 0
                 )
             """)
         self.conn.commit()
@@ -379,6 +399,69 @@ class Database:
             else:
                 break
         return streak
+
+    def update_bot_status(self, bot_id: str = "main", status: str = "running", 
+                         current_window: str = None, error_message: str = None, 
+                         scan_count: int = None):
+        """
+        Update bot heartbeat/status in database.
+        
+        Args:
+            bot_id: Bot identifier (default: "main")
+            status: Current status ("running", "scanning", "idle", "error")
+            current_window: Current window ID or description
+            error_message: Error message if status is "error"
+            scan_count: Number of scans completed
+        """
+        c = self.conn.cursor()
+        now = datetime.now(timezone.utc).isoformat()
+        
+        if self.use_postgres:
+            # PostgreSQL: Use NOW() for timestamp
+            c.execute("""
+                INSERT INTO bot_status (id, last_heartbeat, status, current_window, error_message, scan_count)
+                VALUES (%s, NOW(), %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    last_heartbeat = NOW(),
+                    status = EXCLUDED.status,
+                    current_window = EXCLUDED.current_window,
+                    error_message = EXCLUDED.error_message,
+                    scan_count = COALESCE(EXCLUDED.scan_count, bot_status.scan_count)
+            """, (bot_id, status, current_window, error_message, scan_count))
+        else:
+            # SQLite: Use ISO string
+            c.execute("""
+                INSERT INTO bot_status (id, last_heartbeat, status, current_window, error_message, scan_count)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    last_heartbeat = excluded.last_heartbeat,
+                    status = excluded.status,
+                    current_window = excluded.current_window,
+                    error_message = excluded.error_message,
+                    scan_count = COALESCE(excluded.scan_count, bot_status.scan_count)
+            """, (bot_id, now, status, current_window, error_message, scan_count))
+        
+        self.conn.commit()
+
+    def get_bot_status(self, bot_id: str = "main"):
+        """
+        Get bot status from database.
+        
+        Returns:
+            dict with status, last_heartbeat, current_window, error_message, scan_count
+            or None if bot never started
+        """
+        c = self.conn.cursor()
+        
+        if self.use_postgres:
+            c.execute("SELECT * FROM bot_status WHERE id = %s", (bot_id,))
+        else:
+            c.execute("SELECT * FROM bot_status WHERE id = ?", (bot_id,))
+        
+        row = c.fetchone()
+        if row:
+            return dict(row) if not isinstance(row, dict) else row
+        return None
 
     def close(self):
         self.conn.close()

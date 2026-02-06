@@ -509,6 +509,7 @@ def debug_status():
             "DATABASE_URL_SET": bool(os.getenv("DATABASE_URL")),
             "RESIDENTIAL_PROXY_SET": bool(os.getenv("RESIDENTIAL_PROXY_URL")),
             "RAILWAY_SERVICE_ID": os.getenv("RAILWAY_SERVICE_ID", "not set"),
+            "BOT_SERVICE_ID": os.getenv("BOT_SERVICE_ID", "not set"),
             "RAILWAY_TOKEN_SET": bool(os.getenv("RAILWAY_TOKEN")),
         },
         "database": {},
@@ -566,11 +567,19 @@ def debug_status():
 
 @app.get("/api/bot-status")
 def api_bot_status():
-    """Get bot status and activity"""
-    from bot_status import get_bot_status
-    status = get_bot_status()
+    """Get bot status and activity from database heartbeat"""
+    from db import Database
+    import os
     
-    # Also check database for recent activity as fallback
+    # Get database connection
+    database_url = os.getenv("DATABASE_URL")
+    db_path = os.getenv("DB_PATH", "vig.db")
+    db = Database(db_path, database_url=database_url)
+    
+    # Read bot status from database
+    bot_status = db.get_bot_status("main")
+    
+    # Get last window time for fallback
     conn = get_db()
     if is_postgres(conn):
         from psycopg2.extras import RealDictCursor
@@ -578,45 +587,75 @@ def api_bot_status():
     else:
         c = conn.cursor()
     
-    # Get last window time
     c.execute("SELECT started_at FROM windows ORDER BY id DESC LIMIT 1")
     last_window_row = c.fetchone()
     last_window = dict(last_window_row)["started_at"] if last_window_row else None
+    conn.close()
     
-    # If status file doesn't exist or is old, infer status from database activity
-    if status.get("status") == "unknown" or not status.get("updated_at"):
-        # Check if there's recent database activity (within last hour)
+    if not bot_status:
+        # Bot never started or no heartbeat yet - use window fallback
         if last_window:
             try:
                 last_window_dt = datetime.fromisoformat(last_window.replace("Z", "+00:00"))
                 age_seconds = (datetime.now(timezone.utc) - last_window_dt).total_seconds()
                 if age_seconds < 3600:  # Within last hour
-                    status["status"] = "running"
-                    status["activity"] = "Bot active (inferred from recent windows)"
-                else:
-                    status["status"] = "stopped"
-                    status["activity"] = f"Last activity {int(age_seconds/3600)}h ago"
+                    return {
+                        "status": "running",
+                        "activity": "Bot active (inferred from recent windows)",
+                        "last_scan": last_window,
+                        "updated_at": last_window,
+                        "last_window": last_window
+                    }
             except:
                 pass
-        else:
-            # No windows at all - bot never ran or just started
-            status["status"] = "stopped"
-            status["activity"] = "No activity recorded yet"
+        
+        return {
+            "status": "unknown",
+            "activity": "No heartbeat recorded yet",
+            "last_scan": None,
+            "updated_at": None,
+            "last_window": last_window
+        }
     
-    # If status file exists but is old (>5 minutes), update status
-    elif status.get("updated_at"):
+    # Parse last_heartbeat timestamp
+    last_heartbeat_str = bot_status.get("last_heartbeat")
+    if isinstance(last_heartbeat_str, str):
         try:
-            last_update = datetime.fromisoformat(status["updated_at"].replace("Z", "+00:00"))
-            age_seconds = (datetime.now(timezone.utc) - last_update).total_seconds()
-            if age_seconds > 300:  # 5 minutes
-                status["status"] = "stopped"
-                status["activity"] = "No recent activity detected"
+            last_heartbeat = datetime.fromisoformat(last_heartbeat_str.replace("Z", "+00:00"))
         except:
-            pass
+            last_heartbeat = None
+    else:
+        last_heartbeat = last_heartbeat_str
     
-    status["last_window"] = last_window
-    conn.close()
-    return status
+    # Determine if bot is online (heartbeat within last 2 minutes)
+    status = bot_status.get("status", "unknown")
+    if last_heartbeat:
+        age_seconds = (datetime.now(timezone.utc) - last_heartbeat).total_seconds()
+        if age_seconds > 120:  # No heartbeat in 2 minutes
+            status = "offline"
+    
+    # Format activity message
+    current_window = bot_status.get("current_window", "")
+    error_message = bot_status.get("error_message")
+    
+    if error_message:
+        activity = f"Error: {error_message[:50]}"
+    elif current_window:
+        activity = current_window
+    else:
+        activity = status.capitalize()
+    
+    db.close()
+    
+    return {
+        "status": status,
+        "activity": activity,
+        "last_scan": last_heartbeat_str if last_heartbeat else None,
+        "updated_at": last_heartbeat_str if last_heartbeat else None,
+        "current_window": current_window,
+        "error_message": error_message,
+        "last_window": last_window
+    }
 
 
 # Rate limiting for restart (prevent spam)
@@ -721,19 +760,19 @@ async def api_bot_control(action: str):
                     return result
             
             # Railway auto-injects RAILWAY_SERVICE_ID for the current service
-            # For bot restart, we need BOT_RAILWAY_SERVICE_ID (bot service) or fallback to RAILWAY_SERVICE_ID
+            # For bot restart, we need BOT_SERVICE_ID (bot service) or fallback to RAILWAY_SERVICE_ID
             railway_token = os.getenv("RAILWAY_TOKEN", "")
-            # Prefer BOT_RAILWAY_SERVICE_ID if set (for split services), otherwise use current service ID
-            service_id = os.getenv("BOT_RAILWAY_SERVICE_ID") or os.getenv("RAILWAY_SERVICE_ID", "")
+            # Prefer BOT_SERVICE_ID if set (for split services), otherwise use current service ID
+            service_id = os.getenv("BOT_SERVICE_ID") or os.getenv("RAILWAY_SERVICE_ID", "")
             
             if not railway_token:
                 result["status"] = "info"
-                result["message"] = "⚠️ Railway API not configured.\n\nTo enable restart:\n1. Go to https://railway.app/account → Tokens → Create Token\n2. Use a project-scoped token (not account-wide)\n3. Set RAILWAY_TOKEN environment variable in Railway\n4. Set BOT_RAILWAY_SERVICE_ID to bot service ID (if services are split)\n5. Restart Railway service once to load the variable"
+                result["message"] = "⚠️ Railway API not configured.\n\nTo enable restart:\n1. Go to https://railway.app/account → Tokens → Create Token\n2. Use a project-scoped token (not account-wide)\n3. Set RAILWAY_TOKEN environment variable in Railway\n4. Set BOT_SERVICE_ID to bot service ID (if services are split)\n5. Restart Railway service once to load the variable"
                 return result
             
             if not service_id:
                 result["status"] = "error"
-                result["message"] = "⚠️ Service ID not found.\n\nIf services are split:\n- Set BOT_RAILWAY_SERVICE_ID to bot service ID\n- Or set RAILWAY_SERVICE_ID (auto-injected if bot and dashboard are same service)"
+                result["message"] = "⚠️ Service ID not found.\n\nIf services are split:\n- Set BOT_SERVICE_ID to bot service ID\n- Or set RAILWAY_SERVICE_ID (auto-injected if bot and dashboard are same service)"
                 return result
             
             # Log restart attempt (mask token for security)
