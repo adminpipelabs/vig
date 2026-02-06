@@ -214,33 +214,44 @@ class Database:
         self.conn.commit()
 
     def get_pending_bets(self, window_id: int) -> list[BetRecord]:
-        c = self.conn.cursor()
         if self.use_postgres:
+            from psycopg2.extras import RealDictCursor
+            c = self.conn.cursor(cursor_factory=RealDictCursor)
             c.execute("SELECT * FROM bets WHERE window_id=%s AND result='pending'", (window_id,))
         else:
+            c = self.conn.cursor()
             c.execute("SELECT * FROM bets WHERE window_id=? AND result='pending'", (window_id,))
         return [self._row_to_bet(r) for r in c.fetchall()]
 
     def get_window_bets(self, window_id: int) -> list[BetRecord]:
-        c = self.conn.cursor()
         if self.use_postgres:
+            from psycopg2.extras import RealDictCursor
+            c = self.conn.cursor(cursor_factory=RealDictCursor)
             c.execute("SELECT * FROM bets WHERE window_id=%s", (window_id,))
         else:
+            c = self.conn.cursor()
             c.execute("SELECT * FROM bets WHERE window_id=?", (window_id,))
         return [self._row_to_bet(r) for r in c.fetchall()]
 
     def get_recent_bets(self, n: int = 100) -> list[BetRecord]:
-        c = self.conn.cursor()
         if self.use_postgres:
+            from psycopg2.extras import RealDictCursor
+            c = self.conn.cursor(cursor_factory=RealDictCursor)
             c.execute("SELECT * FROM bets WHERE result!='pending' ORDER BY id DESC LIMIT %s", (n,))
         else:
+            c = self.conn.cursor()
             c.execute("SELECT * FROM bets WHERE result!='pending' ORDER BY id DESC LIMIT ?", (n,))
         return [self._row_to_bet(r) for r in c.fetchall()]
     
     def get_all_pending_bets(self) -> list[BetRecord]:
         """Get all pending bets regardless of window_id"""
-        c = self.conn.cursor()
-        c.execute("SELECT * FROM bets WHERE result='pending' ORDER BY id ASC")
+        if self.use_postgres:
+            from psycopg2.extras import RealDictCursor
+            c = self.conn.cursor(cursor_factory=RealDictCursor)
+            c.execute("SELECT * FROM bets WHERE result='pending' ORDER BY id ASC")
+        else:
+            c = self.conn.cursor()
+            c.execute("SELECT * FROM bets WHERE result='pending' ORDER BY id ASC")
         return [self._row_to_bet(r) for r in c.fetchall()]
 
     def get_all_stats(self) -> dict:
@@ -258,7 +269,34 @@ class Database:
         return dict(row) if row else {}
 
     def _row_to_bet(self, row) -> BetRecord:
-        return BetRecord(**{k: row[k] for k in row.keys()})
+        # Convert to dict if needed (PostgreSQL RealDictRow is already dict-like, SQLite Row is dict-like, but tuples need conversion)
+        if isinstance(row, dict):
+            return BetRecord(**row)
+        elif hasattr(row, 'keys'):
+            return BetRecord(**{k: row[k] for k in row.keys()})
+        else:
+            # Fallback for tuple rows (shouldn't happen with RealDictCursor, but safe fallback)
+            # This assumes standard column order - not ideal but prevents crashes
+            return BetRecord(
+                id=row[0] if len(row) > 0 else None,
+                window_id=row[1] if len(row) > 1 else 0,
+                platform=row[2] if len(row) > 2 else "polymarket",
+                market_id=row[3] if len(row) > 3 else "",
+                condition_id=row[4] if len(row) > 4 else "",
+                market_question=row[5] if len(row) > 5 else "",
+                token_id=row[6] if len(row) > 6 else "",
+                side=row[7] if len(row) > 7 else "",
+                price=row[8] if len(row) > 8 else 0.0,
+                amount=row[9] if len(row) > 9 else 0.0,
+                size=row[10] if len(row) > 10 else 0.0,
+                order_id=row[11] if len(row) > 11 else "",
+                placed_at=row[12] if len(row) > 12 else "",
+                resolved_at=row[13] if len(row) > 13 else "",
+                result=row[14] if len(row) > 14 else "pending",
+                payout=row[15] if len(row) > 15 else 0.0,
+                profit=row[16] if len(row) > 16 else 0.0,
+                paper=bool(row[17]) if len(row) > 17 else True
+            )
 
     def insert_window(self, window: WindowRecord) -> int:
         c = self.conn.cursor()
@@ -302,13 +340,18 @@ class Database:
         self.conn.commit()
 
     def get_window(self, window_id: int) -> Optional[WindowRecord]:
-        c = self.conn.cursor()
         if self.use_postgres:
+            from psycopg2.extras import RealDictCursor
+            c = self.conn.cursor(cursor_factory=RealDictCursor)
             c.execute("SELECT * FROM windows WHERE id=%s", (window_id,))
         else:
+            c = self.conn.cursor()
             c.execute("SELECT * FROM windows WHERE id=?", (window_id,))
         row = c.fetchone()
-        return WindowRecord(**{k: row[k] for k in row.keys()}) if row else None
+        if row:
+            row_dict = dict(row) if not isinstance(row, dict) else row
+            return WindowRecord(**row_dict)
+        return None
 
     def get_recent_windows(self, n: int = 20) -> list[WindowRecord]:
         if self.use_postgres:
@@ -334,11 +377,16 @@ class Database:
         self.conn.commit()
 
     def get_consecutive_losses(self) -> int:
-        c = self.conn.cursor()
+        if self.use_postgres:
+            from psycopg2.extras import RealDictCursor
+            c = self.conn.cursor(cursor_factory=RealDictCursor)
+        else:
+            c = self.conn.cursor()
         c.execute("SELECT result FROM bets WHERE result!='pending' ORDER BY id DESC")
         streak = 0
         for row in c.fetchall():
-            if row["result"] == "lost":
+            row_dict = dict(row) if not isinstance(row, dict) else row
+            if row_dict.get("result") == "lost":
                 streak += 1
             else:
                 break
