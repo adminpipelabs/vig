@@ -1,177 +1,83 @@
 """
 proxy_init.py
-MUST be imported BEFORE py_clob_client or any other module that uses httpx.
-Patches httpx.Client and httpx.AsyncClient to always use residential proxy.
-
-This file must be imported first in main.py:
-    import proxy_init  # FIRST import
-    from py_clob_client.client import ClobClient  # Then other imports
+MUST be imported FIRST in main.py. Does two things:
+1. Patches httpx so all clients use our proxy and ignore env proxy (trust_env=False).
+2. Replaces py_clob_client's global _http_client with a proxied client (they use a module-level client).
 """
 import os
 import httpx
 
-# Debug: Check ALL environment variables that might contain proxy info
-print("=" * 70)
-print("🔍 DEBUG: Checking for proxy environment variables...")
-proxy_env_vars = [
-    "RESIDENTIAL_PROXY_URL",
-    " RESIDENTIAL_PROXY_URL",  # Check for leading space (Railway quirk)
-    "RESIDENTIAL_PROXY_URL ",   # Check for trailing space
-    "HTTPS_PROXY",
-    "HTTP_PROXY",
-    "https_proxy",
-    "http_proxy",
-]
+# Unset env proxy vars so nothing overrides our proxy (httpx uses them when trust_env=True)
+for key in list(os.environ.keys()):
+    if key.upper() in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY"):
+        del os.environ[key]
 
-found_vars = {}
-for var_name in proxy_env_vars:
-    value = os.getenv(var_name, None)
-    if value:
-        found_vars[var_name] = value.strip()
-
-if found_vars:
-    print(f"✅ Found {len(found_vars)} proxy-related environment variable(s):")
-    for var_name, value in found_vars.items():
-        # Redact password for logging
-        if "@" in value:
-            parts = value.split("@")
-            if ":" in parts[0]:
-                user_pass = parts[0].split(":")
-                if len(user_pass) == 2:
-                    redacted = f"{user_pass[0]}:****@{parts[1]}"
-                    print(f"   {var_name} = {redacted}")
-                else:
-                    print(f"   {var_name} = {value[:50]}...")
-            else:
-                print(f"   {var_name} = {value[:50]}...")
-        else:
-            print(f"   {var_name} = {value[:50]}...")
-else:
-    print("❌ NO proxy environment variables found!")
-    print("   Checked: RESIDENTIAL_PROXY_URL, HTTPS_PROXY, HTTP_PROXY")
-print("=" * 70)
-
-# HARDCODED PROXY URL - Get bot trading immediately
-# TODO: Move back to environment variable once Railway variable issue is resolved
+# Hardcoded proxy — bot must trade; env var was not reliably read on Railway
 PROXY_URL = "http://brd-customer-hl_b4689439-zone-residential_proxy1:5teowbs6s9c9@brd.superproxy.io:33335"
 
-if PROXY_URL:
-    print(f"✅ Using proxy URL: {PROXY_URL.split('@')[-1] if '@' in PROXY_URL else PROXY_URL[:50]}...")
-else:
-    print("⚠️  PROXY_URL is empty - no proxy will be used")
+# Allow override from env if set (so we can switch back later without code change)
+_env_proxy = os.getenv("RESIDENTIAL_PROXY_URL", "").strip()
+if _env_proxy and "placeholder" not in _env_proxy.lower() and "your-" not in _env_proxy.lower():
+    PROXY_URL = _env_proxy
 
-
-def is_valid_proxy():
-    """Check if proxy URL is valid (not a placeholder)"""
-    if not PROXY_URL:
+def _is_valid_proxy():
+    if not PROXY_URL or not PROXY_URL.startswith("http"):
         return False
-    # Check for placeholder patterns
-    placeholder_patterns = [
-        "your-username", "your-proxy", "placeholder", 
-        "user:pass", "username:password", "@host", ":port"
-    ]
-    proxy_lower = PROXY_URL.lower()
-    if any(pattern in proxy_lower for pattern in placeholder_patterns):
-        return False
-    
-    # Warn if using wrong port for Bright Data residential proxy
-    if "brd.superproxy.io" in PROXY_URL:
-        if ":22225" in PROXY_URL:
-            print("⚠️  WARNING: Bright Data residential proxy should use port 33335, not 22225")
-            print("   Update RESIDENTIAL_PROXY_URL to use port 33335")
-        elif ":33335" not in PROXY_URL:
-            print(f"⚠️  WARNING: Unexpected port in Bright Data proxy URL: {PROXY_URL}")
-    
-    return True
+    bad = ("placeholder", "your-username", "your-proxy", "user:pass", ":port")
+    return not any(p in PROXY_URL.lower() for p in bad)
 
 
-if is_valid_proxy():
-    # Store original classes
+if _is_valid_proxy():
     _OriginalClient = httpx.Client
     _OriginalAsyncClient = httpx.AsyncClient
-    
-    # Create proxied versions
+
     class ProxiedClient(_OriginalClient):
-        """httpx.Client with automatic proxy injection"""
         def __init__(self, *args, **kwargs):
-            # Always inject proxy if not already set
-            # httpx prefers 'proxy' parameter (single string) over 'proxies' dict
-            # IMPORTANT: httpx expects proxy URL in format: http://user:pass@host:port
-            # Bright Data format: http://brd-customer-XXXXX-zone-ZONE:PASSWORD@brd.superproxy.io:33335
-            
-            if 'proxy' not in kwargs and 'proxies' not in kwargs:
-                kwargs['proxy'] = PROXY_URL
-            elif 'proxies' in kwargs and not kwargs['proxies']:
-                # If proxies dict is empty, use our proxy
-                kwargs['proxy'] = PROXY_URL
-                kwargs.pop('proxies', None)
-            elif 'proxy' not in kwargs:
-                # If proxies dict exists but proxy doesn't, add it
-                kwargs['proxy'] = PROXY_URL
-            
-            # Verify proxy URL format is correct
-            proxy_to_use = kwargs.get('proxy', PROXY_URL)
-            if proxy_to_use:
-                if not proxy_to_use.startswith('http://') and not proxy_to_use.startswith('https://'):
-                    print(f"⚠️  WARNING: Proxy URL doesn't start with http:// or https://: {proxy_to_use[:50]}")
-                if '@' not in proxy_to_use:
-                    print(f"⚠️  WARNING: Proxy URL missing @ separator (no auth?): {proxy_to_use[:50]}")
-                # Log that we're injecting proxy (redacted)
-                if "@" in proxy_to_use:
-                    parts = proxy_to_use.split("@")
-                    if ":" in parts[0]:
-                        user_pass = parts[0].split(":")
-                        if len(user_pass) >= 2:
-                            redacted = f"{user_pass[0]}:****@{parts[1]}"
-                            print(f"✅ Injecting proxy into httpx.Client: {redacted}")
-            
-            # Add browser-like headers to help bypass Cloudflare
-            if 'headers' not in kwargs:
-                kwargs['headers'] = {}
-            headers = kwargs['headers']
-            headers.setdefault('User-Agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-            headers.setdefault('Accept', 'application/json')
-            headers.setdefault('Accept-Language', 'en-US,en;q=0.9')
-            headers.setdefault('Accept-Encoding', 'gzip, deflate, br')
-            headers.setdefault('Connection', 'keep-alive')
-            
+            kwargs["proxy"] = PROXY_URL
+            kwargs["trust_env"] = False  # do not use HTTPS_PROXY etc.
+            if "proxies" in kwargs:
+                del kwargs["proxies"]
             super().__init__(*args, **kwargs)
-    
+
     class ProxiedAsyncClient(_OriginalAsyncClient):
-        """httpx.AsyncClient with automatic proxy injection"""
         def __init__(self, *args, **kwargs):
-            # Always inject proxy if not already set
-            if 'proxy' not in kwargs and 'proxies' not in kwargs:
-                kwargs['proxy'] = PROXY_URL
-            elif 'proxies' in kwargs and not kwargs['proxies']:
-                kwargs['proxy'] = PROXY_URL
-                kwargs.pop('proxies', None)
-            elif 'proxy' not in kwargs:
-                kwargs['proxy'] = PROXY_URL
-            
-            # Add browser-like headers
-            if 'headers' not in kwargs:
-                kwargs['headers'] = {}
-            headers = kwargs['headers']
-            headers.setdefault('User-Agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-            headers.setdefault('Accept', 'application/json')
-            headers.setdefault('Accept-Language', 'en-US,en;q=0.9')
-            
+            kwargs["proxy"] = PROXY_URL
+            kwargs["trust_env"] = False
+            if "proxies" in kwargs:
+                del kwargs["proxies"]
             super().__init__(*args, **kwargs)
-    
-    # Replace httpx classes
+
     httpx.Client = ProxiedClient
     httpx.AsyncClient = ProxiedAsyncClient
-    
-    # Also patch internal module references
     try:
         import httpx._client
         httpx._client.Client = ProxiedClient
         httpx._client.AsyncClient = ProxiedAsyncClient
-    except:
+    except Exception:
         pass
-    
-    proxy_display = PROXY_URL.split("@")[-1] if "@" in PROXY_URL else PROXY_URL[:30] + "..."
-    print(f"✅ PROXY ACTIVE: httpx patched with {proxy_display}")
+
+    # py_clob_client uses a MODULE-LEVEL client in http_helpers/helpers.py:
+    #   _http_client = httpx.Client(http2=True)
+    # We replace it with a client that has proxy + trust_env=False so env vars cannot override.
+    import py_clob_client.http_helpers.helpers as _helpers
+    if getattr(_helpers, "_http_client", None) is not None:
+        try:
+            _helpers._http_client.close()
+        except Exception:
+            pass
+        _helpers._http_client = httpx.Client(
+            proxy=PROXY_URL,
+            trust_env=False,
+            http2=True,
+            timeout=30.0,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+        )
+
+    _display = PROXY_URL.split("@")[-1] if "@" in PROXY_URL else PROXY_URL[:40]
+    print(f"PROXY ACTIVE: {_display}")
 else:
-    print(f"⚠️  NO PROXY: RESIDENTIAL_PROXY_URL not set or invalid")
+    print("NO PROXY: RESIDENTIAL_PROXY_URL invalid or unset")

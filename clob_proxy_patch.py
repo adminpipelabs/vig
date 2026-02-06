@@ -192,30 +192,134 @@ def add_debug_wrapper():
         request_id = _request_count[0]
         
         # Log request details (including proxy)
-        # Check multiple ways proxy might be stored
-        proxy_info = (
-            getattr(self, '_proxy', None) or 
-            getattr(self, '_proxies', {}) or 
-            kwargs.get('proxy') or
-            (hasattr(self, 'transport') and getattr(self.transport, '_proxy', None)) or
-            None
-        )
-        proxy_set = bool(proxy_info)
-        logger.info(f"🌐 HTTPX Request #{request_id}: {method} {url[:60]}... (proxy: {proxy_set})")
+        # Check multiple ways proxy might be stored - be thorough
+        proxy_info = None
+        proxy_set = False
+        
+        # Method 1: Check kwargs
+        if 'proxy' in kwargs:
+            proxy_info = kwargs['proxy']
+            proxy_set = True
+        elif 'proxies' in kwargs and kwargs['proxies']:
+            proxy_info = kwargs['proxies']
+            proxy_set = True
+        
+        # Method 2: Check client instance attributes
+        if not proxy_set:
+            proxy_info = getattr(self, '_proxy', None)
+            if proxy_info:
+                proxy_set = True
+        
+        # Method 3: Check proxies dict
+        if not proxy_set:
+            proxies_dict = getattr(self, '_proxies', None)
+            if proxies_dict:
+                proxy_info = proxies_dict
+                proxy_set = True
+        
+        # Method 4: Check transport layer
+        if not proxy_set and hasattr(self, 'transport'):
+            transport = self.transport
+            # Check transport._proxy
+            if hasattr(transport, '_proxy') and transport._proxy:
+                proxy_info = transport._proxy
+                proxy_set = True
+            # Check transport._pool._proxy
+            elif hasattr(transport, '_pool') and hasattr(transport._pool, '_proxy'):
+                pool_proxy = transport._pool._proxy
+                if pool_proxy:
+                    proxy_info = pool_proxy
+                    proxy_set = True
+        
+        # Method 5: Check if httpx is using HTTPS_PROXY env var automatically
+        if not proxy_set:
+            import os
+            https_proxy = os.getenv('HTTPS_PROXY') or os.getenv('https_proxy')
+            if https_proxy:
+                proxy_info = f"HTTPS_PROXY env var: {https_proxy[:50]}..."
+                proxy_set = True
+        
+        # Method 6: Check httpcore connection pool directly (most reliable)
+        if not proxy_set and hasattr(self, 'transport'):
+            try:
+                transport = self.transport
+                # Check httpcore._sync.connection_pool.ConnectionPool
+                if hasattr(transport, '_pool'):
+                    pool = transport._pool
+                    # httpcore stores proxy in _proxy attribute
+                    if hasattr(pool, '_proxy') and pool._proxy:
+                        proxy_info = str(pool._proxy)
+                        proxy_set = True
+                    # Or check _connections for proxy info
+                    elif hasattr(pool, '_connections'):
+                        for conn in pool._connections.values():
+                            if hasattr(conn, '_proxy') and conn._proxy:
+                                proxy_info = str(conn._proxy)
+                                proxy_set = True
+                                break
+            except Exception as e:
+                logger.debug(f"Could not check transport pool for proxy: {e}")
+        
+        # Log first request at INFO to confirm proxy; rest at DEBUG to avoid log flood
+        if request_id == 1:
+            logger.info(f"HTTPX Request #1: {method} {url[:50]}... (proxy: {proxy_set})")
+        else:
+            logger.debug(f"HTTPX Request #{request_id}: {method} {url[:50]}... (proxy: {proxy_set})")
+        if proxy_set and proxy_info:
+            # Redact password for logging
+            proxy_str = str(proxy_info)
+            if isinstance(proxy_info, dict):
+                proxy_str = str(list(proxy_info.values())[0]) if proxy_info else "dict"
+            if "@" in proxy_str and ":" in proxy_str.split("@")[0]:
+                parts = proxy_str.split("@")
+                user_pass = parts[0].split(":")
+                if len(user_pass) >= 2:
+                    redacted = f"{user_pass[0]}:****@{parts[1] if len(parts) > 1 else ''}"
+                    logger.debug(f"   Proxy details: {redacted}")
         
         try:
             result = _original_request(self, method, url, **kwargs)
             logger.debug(f"✅ HTTPX Request #{request_id} succeeded: {result.status_code if hasattr(result, 'status_code') else 'OK'}")
             return result
         except Exception as e:
-            # Get proxy info from multiple sources
-            proxy_info = (
-                getattr(self, '_proxy', None) or 
-                getattr(self, '_proxies', {}) or 
-                kwargs.get('proxy') or
-                getattr(self, 'transport', None) and hasattr(self.transport, '_proxy') or
-                "Not set"
-            )
+            # Get proxy info from multiple sources - comprehensive check
+            proxy_info = None
+            proxy_detected = False
+            
+            # Check all the same methods as above
+            if 'proxy' in kwargs:
+                proxy_info = kwargs['proxy']
+                proxy_detected = True
+            elif 'proxies' in kwargs and kwargs['proxies']:
+                proxy_info = kwargs['proxies']
+                proxy_detected = True
+            elif hasattr(self, '_proxy') and self._proxy:
+                proxy_info = self._proxy
+                proxy_detected = True
+            elif hasattr(self, '_proxies') and self._proxies:
+                proxy_info = self._proxies
+                proxy_detected = True
+            elif hasattr(self, 'transport'):
+                transport = self.transport
+                if hasattr(transport, '_proxy') and transport._proxy:
+                    proxy_info = transport._proxy
+                    proxy_detected = True
+                elif hasattr(transport, '_pool') and hasattr(transport._pool, '_proxy'):
+                    pool_proxy = transport._pool._proxy
+                    if pool_proxy:
+                        proxy_info = pool_proxy
+                        proxy_detected = True
+            
+            # Check HTTPS_PROXY env var
+            if not proxy_detected:
+                import os
+                https_proxy = os.getenv('HTTPS_PROXY') or os.getenv('https_proxy')
+                if https_proxy:
+                    proxy_info = f"HTTPS_PROXY env var: {https_proxy}"
+                    proxy_detected = True
+            
+            if not proxy_detected:
+                proxy_info = "Not set"
             
             logger.error("=" * 70)
             logger.error(f"❌ HTTPX Request #{request_id} FAILED:")

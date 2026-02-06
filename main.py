@@ -16,30 +16,6 @@ import logging
 import random
 from datetime import datetime, timezone
 
-# Debug: Verify environment variable is accessible after proxy_init
-print("=" * 70)
-print("🔍 DEBUG: Environment check in main.py")
-proxy_from_env = os.getenv("RESIDENTIAL_PROXY_URL", "NOT SET")
-if proxy_from_env != "NOT SET":
-    # Redact password
-    if "@" in proxy_from_env:
-        parts = proxy_from_env.split("@")
-        if ":" in parts[0]:
-            user_pass = parts[0].split(":")
-            if len(user_pass) == 2:
-                redacted = f"{user_pass[0]}:****@{parts[1]}"
-                print(f"✅ RESIDENTIAL_PROXY_URL in main.py: {redacted}")
-            else:
-                print(f"✅ RESIDENTIAL_PROXY_URL in main.py: {proxy_from_env[:50]}...")
-        else:
-            print(f"✅ RESIDENTIAL_PROXY_URL in main.py: {proxy_from_env[:50]}...")
-    else:
-        print(f"✅ RESIDENTIAL_PROXY_URL in main.py: {proxy_from_env[:50]}...")
-else:
-    print("❌ RESIDENTIAL_PROXY_URL NOT SET in main.py")
-    print("   This means Railway doesn't have the variable set correctly")
-print("=" * 70)
-
 from datetime import datetime, timezone
 
 # Set up logging
