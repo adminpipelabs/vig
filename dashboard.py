@@ -1119,7 +1119,7 @@ let lastWindowAt=null;
 
 async function fetchJSON(u){try{const r=await fetch(u);return await r.json()}catch(e){return null}}
 function fmt(n){if(n==null)return'--';const sign=n>=0?'+':'-';return sign+'$'+Math.abs(n).toFixed(2)}
-function timeAgo(iso){if(!iso)return'--';const d=new Date(iso),s=(Date.now()-d.getTime())/1000;if(s<60)return Math.floor(s)+'s ago';if(s<3600)return Math.floor(s/60)+'m ago';if(s<86400)return Math.floor(s/3600)+'h ago';return Math.floor(s/86400)+'d ago'}
+function timeAgo(iso){if(!iso)return'--';const d=new Date(iso),s=(Date.now()-d.getTime())/1000;if(s<60)return Math.floor(s)+'s ago';if(s<3600){const m=Math.floor(s/60);return m+'m ago';}if(s<172800){const h=Math.floor(s/3600),m=Math.floor((s%3600)/60);if(m===0)return h+'h ago';return h+'h '+m+'m ago';}return Math.floor(s/86400)+'d ago'}
 
 // Countdown timer
 function updateCountdown(){
