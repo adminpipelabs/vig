@@ -123,26 +123,28 @@ def patch_clob_globally():
 def _patch_httpx_globally():
     """
     Fallback: Patch httpx.Client to always use proxy if client attribute not found.
+    This patches httpx.Client.__init__ to inject proxy parameter.
     """
     _original_client_init = httpx.Client.__init__
     
     def _patched_client_init(self, *args, **kwargs):
-        # Call original init
+        # Inject proxy if not already provided
+        if 'proxy' not in kwargs:
+            kwargs['proxy'] = PROXY_URL
+            logger.debug(f"Injecting proxy into httpx.Client: {PROXY_URL.split('@')[-1] if '@' in PROXY_URL else '...'}")
+        
+        # Call original init with proxy included
         _original_client_init(self, *args, **kwargs)
         
-        # If proxy not already set, add it
-        if 'proxy' not in kwargs and not getattr(self, '_proxy', None):
-            # Set proxy on the client
-            try:
-                # httpx stores proxy in _proxy or proxies dict
-                if not hasattr(self, '_proxy'):
-                    self._proxy = PROXY_URL
-                logger.debug(f"httpx.Client patched with proxy: {PROXY_URL.split('@')[-1] if '@' in PROXY_URL else '...'}")
-            except:
-                pass
+        # Verify proxy was set
+        proxy_set = getattr(self, '_proxy', None) or getattr(self, '_proxies', {})
+        if proxy_set:
+            logger.info(f"✅ httpx.Client created with proxy: {bool(proxy_set)}")
+        else:
+            logger.warning("⚠️  Proxy may not have been set in httpx.Client")
     
     httpx.Client.__init__ = _patched_client_init
-    logger.info("✅ httpx.Client globally patched as fallback")
+    logger.info("✅ httpx.Client.__init__ globally patched - all new clients will use proxy")
 
 
 def add_debug_wrapper():
@@ -153,17 +155,32 @@ def add_debug_wrapper():
     _original_request = httpx.Client.request
     
     def _debug_request(self, method, url, **kwargs):
+        # Log request details (including proxy)
+        proxy_info = getattr(self, '_proxy', None) or getattr(self, '_proxies', {}) or kwargs.get('proxy')
+        logger.debug(f"HTTPX Request: {method} {url} (proxy: {bool(proxy_info)})")
+        
         try:
             return _original_request(self, method, url, **kwargs)
         except Exception as e:
-            proxy_info = getattr(self, '_proxy', None) or getattr(self, '_proxies', {})
+            # Get proxy info from multiple sources
+            proxy_info = (
+                getattr(self, '_proxy', None) or 
+                getattr(self, '_proxies', {}) or 
+                kwargs.get('proxy') or
+                "Not set"
+            )
+            
+            logger.error("=" * 60)
             logger.error(f"❌ HTTPX Request failed:")
             logger.error(f"   Method: {method}")
             logger.error(f"   URL: {url}")
-            logger.error(f"   Proxy: {proxy_info}")
-            logger.error(f"   Error: {type(e).__name__}: {e}")
+            logger.error(f"   Proxy configured: {bool(proxy_info) and proxy_info != 'Not set'}")
+            logger.error(f"   Proxy value: {str(proxy_info)[:50] if proxy_info != 'Not set' else 'Not set'}")
+            logger.error(f"   Error type: {type(e).__name__}")
+            logger.error(f"   Error message: {str(e)[:200]}")
             import traceback
-            logger.error(f"   Traceback:\n{traceback.format_exc()}")
+            logger.error(f"   Full traceback:\n{traceback.format_exc()}")
+            logger.error("=" * 60)
             raise
     
     httpx.Client.request = _debug_request
