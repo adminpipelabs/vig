@@ -85,16 +85,19 @@ if _is_valid_proxy():
     import sys
     sys.stdout.flush()  # Force output
     
-    # Test proxy connection at startup - BLOCKING so we see results immediately
+    # Test proxy connection at startup - NON-BLOCKING with timeout
     # Use print() since logging might not be initialized yet when proxy_init runs
     import logging
+    import threading
+    import time
+    
     try:
         _logger = logging.getLogger("vig.proxy")
     except:
         # Fallback to print if logging not ready
         class _PrintLogger:
-            def info(self, msg): print(msg)
-            def error(self, msg): print(msg)
+            def info(self, msg): print(msg); sys.stdout.flush()
+            def error(self, msg): print(msg); sys.stdout.flush()
         _logger = _PrintLogger()
     
     def _test_proxy():
