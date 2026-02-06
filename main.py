@@ -9,6 +9,7 @@ import logging
 import random
 from datetime import datetime, timezone
 
+from datetime import datetime, timezone
 from config import Config
 from db import Database, WindowRecord
 from scanner import Scanner

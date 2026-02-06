@@ -934,19 +934,8 @@ canvas { width:100%!important; height:100%!important; }
     <div class="table-wrap" id="pendingTable"></div>
   </div>
 
-  <!-- Live Scanner -->
-  <div class="card" style="margin-bottom:16px">
-    <div class="card-header">
-      <div class="card-title">Live Scanner</div>
-      <button class="btn btn-cyan" id="scanBtn" onclick="runScan()">Scan Now</button>
-    </div>
-    <div id="scanResults">
-      <div class="empty"><div class="empty-icon">&#9673;</div><div>Hit "Scan Now" to scan Polymarket for expiring markets (future: additional prediction exchanges)</div></div>
-    </div>
-  </div>
-
   <!-- Bot Status Card -->
-  <div class="card">
+  <div class="card" style="margin-bottom:16px">
     <div class="card-header">
       <div class="card-title">Bot Status</div>
       <div class="card-actions">
@@ -955,6 +944,17 @@ canvas { width:100%!important; height:100%!important; }
     </div>
     <div id="botStatusContent">
       <div class="empty">Loading bot status...</div>
+    </div>
+  </div>
+
+  <!-- Live Scanner -->
+  <div class="card" style="margin-bottom:16px">
+    <div class="card-header">
+      <div class="card-title">Live Scanner</div>
+      <button class="btn btn-cyan" id="scanBtn" onclick="runScan()">Scan Now</button>
+    </div>
+    <div id="scanResults">
+      <div class="empty"><div class="empty-icon">&#9673;</div><div>Hit "Scan Now" to scan Polymarket for expiring markets (future: additional prediction exchanges)</div></div>
     </div>
   </div>
 
