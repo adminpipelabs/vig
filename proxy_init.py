@@ -85,5 +85,23 @@ if _is_valid_proxy():
 
     _display = PROXY_URL.split("@")[-1] if "@" in PROXY_URL else PROXY_URL[:40]
     print(f"PROXY ACTIVE: {_display}")
+    
+    # Test proxy connection at startup (non-blocking, just logs)
+    def _test_proxy():
+        try:
+            test_client = httpx.Client(proxy=PROXY_URL, trust_env=False, timeout=5.0)
+            resp = test_client.get("https://lumtest.com/myip.json", timeout=5.0)
+            test_client.close()
+            if resp.status_code == 200:
+                print(f"✅ Proxy test: Connected to Bright Data (IP: {resp.json().get('ip', 'unknown')})")
+            else:
+                print(f"⚠️  Proxy test: Bright Data returned {resp.status_code}")
+        except Exception as e:
+            print(f"⚠️  Proxy test failed: {e}")
+            print("   This might indicate Bright Data auth issue or network problem")
+    
+    # Run test in background (don't block startup)
+    import threading
+    threading.Thread(target=_test_proxy, daemon=True).start()
 else:
     print("NO PROXY: RESIDENTIAL_PROXY_URL invalid or unset")
