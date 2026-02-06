@@ -11,6 +11,11 @@ from fastapi.responses import HTMLResponse, JSONResponse
 import httpx
 import logging
 
+# Suppress verbose HTTP/2 and HPACK debug logs
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("hpack").setLevel(logging.WARNING)
+
 logger = logging.getLogger("vig.dashboard")
 
 app = FastAPI(title="Vig Dashboard")

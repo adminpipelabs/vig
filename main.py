@@ -19,14 +19,19 @@ from bet_manager import BetManager
 from notifier import Notifier
 from bot_status import update_bot_status
 
-# Set log level from config (default to DEBUG for settlement debugging)
-log_level = os.getenv("LOG_LEVEL", "DEBUG").upper()
+# Set log level from config (default to INFO for production)
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=getattr(logging, log_level, logging.DEBUG),
+    level=getattr(logging, log_level, logging.INFO),
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("vig")
+
+# Suppress verbose HTTP/2 and HPACK debug logs from httpx/httpcore
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("hpack").setLevel(logging.WARNING)
 
 running = True
 
