@@ -79,6 +79,9 @@ class Database:
             self.database_url = database_url or os.getenv("DATABASE_URL")
             self.conn = psycopg2.connect(self.database_url)
             self.conn.set_session(autocommit=False)
+            # Set RealDictCursor as default for all cursors (matches SQLite Row behavior)
+            from psycopg2.extras import RealDictCursor
+            self.conn.cursor_factory = RealDictCursor
         else:
             # Use SQLite (backward compatibility)
             self.use_postgres = False
