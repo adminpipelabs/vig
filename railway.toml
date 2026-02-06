@@ -1,3 +1,2 @@
-# Railway will auto-detect Python from requirements.txt
-# Procfile defines separate services: web (dashboard) and worker (bot)
-# Railway will split these into two services automatically
+# Railway will auto-detect Dockerfile and use it
+# This bypasses nixpacks/mise SSL certificate issues
