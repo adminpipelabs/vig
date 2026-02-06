@@ -67,10 +67,20 @@ def setup_clob_proxy():
         os.environ["HTTPS_PROXY"] = proxy_url
         os.environ["HTTP_PROXY"] = proxy_url
         
+        # Also set NO_PROXY to empty to ensure proxy is used
+        # (some environments have NO_PROXY set which can prevent proxy usage)
+        os.environ.pop("NO_PROXY", None)
+        
         # Log (without exposing credentials)
         proxy_display = proxy_url.split("@")[0] + "@..." if "@" in proxy_url else proxy_url[:20] + "..."
-        logger.info(f"Residential proxy configured: {proxy_display}")
+        logger.info(f"✅ Residential proxy configured: {proxy_display}")
         logger.info("CLOB API calls will route through residential proxy (httpx auto-detects HTTPS_PROXY)")
+        
+        # Verify proxy URL format
+        if parsed.port:
+            logger.info(f"Proxy host: {parsed.hostname}, port: {parsed.port}")
+        else:
+            logger.warning("⚠️  Proxy URL has no explicit port - ensure port is included in URL")
     else:
         logger.info("No RESIDENTIAL_PROXY_URL set - CLOB API calls will use direct connection")
         logger.warning("⚠️  CLOB API may be blocked by Cloudflare if running from datacenter IP")
@@ -90,8 +100,20 @@ def get_clob_client_with_proxy(host: str, key: str, chain_id: int):
     # Setup proxy environment variables before importing ClobClient
     setup_clob_proxy()
     
+    # Verify proxy env vars are set
+    https_proxy = os.getenv("HTTPS_PROXY")
+    if not https_proxy:
+        raise RuntimeError("HTTPS_PROXY not set after setup_clob_proxy() - this should not happen")
+    
+    logger.info(f"HTTPS_PROXY env var is set (length: {len(https_proxy)} chars)")
+    
     from py_clob_client.client import ClobClient
     
     # ClobClient uses httpx internally, which will now use the proxy
+    # Note: httpx automatically checks HTTPS_PROXY env var
     client = ClobClient(host, key=key, chain_id=chain_id)
+    
+    # Log that client was created (proxy should be active)
+    logger.info("ClobClient created - proxy should be active for all HTTP requests")
+    
     return client

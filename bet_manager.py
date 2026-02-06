@@ -91,7 +91,23 @@ class BetManager:
                 return resp.get("orderID", resp.get("id", str(resp)))
             return str(resp)
         except Exception as e:
-            logger.error(f"Order failed: {e}")
+            error_str = str(e)
+            # Check for Cloudflare blocking
+            if "403" in error_str or "Cloudflare" in error_str or "blocked" in error_str.lower():
+                logger.error("=" * 60)
+                logger.error("❌ CLOUDflare BLOCKING DETECTED")
+                logger.error("CLOB API requests are being blocked by Cloudflare.")
+                logger.error("This means RESIDENTIAL_PROXY_URL is either:")
+                logger.error("  1. Not set correctly")
+                logger.error("  2. Not working (proxy server down/invalid)")
+                logger.error("  3. Proxy itself is blocked")
+                logger.error("=" * 60)
+                logger.error("Check Railway environment variables:")
+                logger.error("  - RESIDENTIAL_PROXY_URL should be: http://user:pass@proxy-host:port")
+                logger.error("  - Verify proxy is working by testing it manually")
+                logger.error("=" * 60)
+            else:
+                logger.error(f"Order failed: {e}")
             return None
 
     def settle_bets(self, window_id):
