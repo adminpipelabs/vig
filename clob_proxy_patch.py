@@ -126,22 +126,33 @@ def _patch_httpx_globally():
     This patches httpx.Client.__init__ to inject proxy parameter.
     """
     _original_client_init = httpx.Client.__init__
+    _patched_count = [0]  # Use list to allow modification in nested function
     
     def _patched_client_init(self, *args, **kwargs):
         # Inject proxy if not already provided
         if 'proxy' not in kwargs:
             kwargs['proxy'] = PROXY_URL
-            logger.debug(f"Injecting proxy into httpx.Client: {PROXY_URL.split('@')[-1] if '@' in PROXY_URL else '...'}")
+            _patched_count[0] += 1
+            proxy_display = PROXY_URL.split("@")[-1] if "@" in PROXY_URL else PROXY_URL[:30] + "..."
+            logger.info(f"🔧 Injecting proxy into httpx.Client #{_patched_count[0]}: {proxy_display}")
         
         # Call original init with proxy included
         _original_client_init(self, *args, **kwargs)
         
-        # Verify proxy was set
-        proxy_set = getattr(self, '_proxy', None) or getattr(self, '_proxies', {})
+        # Verify proxy was set (check multiple ways httpx might store it)
+        proxy_set = (
+            getattr(self, '_proxy', None) or 
+            getattr(self, '_proxies', {}) or
+            getattr(self, 'transport', None) and hasattr(self.transport, '_proxy')
+        )
         if proxy_set:
-            logger.info(f"✅ httpx.Client created with proxy: {bool(proxy_set)}")
+            logger.info(f"✅ httpx.Client #{_patched_count[0]} verified with proxy")
         else:
-            logger.warning("⚠️  Proxy may not have been set in httpx.Client")
+            # Try to inspect transport
+            transport_info = "None"
+            if hasattr(self, 'transport'):
+                transport_info = f"{type(self.transport).__name__}"
+            logger.warning(f"⚠️  httpx.Client #{_patched_count[0]} proxy verification unclear (transport: {transport_info})")
     
     httpx.Client.__init__ = _patched_client_init
     logger.info("✅ httpx.Client.__init__ globally patched - all new clients will use proxy")
@@ -153,35 +164,52 @@ def add_debug_wrapper():
     This helps diagnose proxy connection issues.
     """
     _original_request = httpx.Client.request
+    _request_count = [0]
     
     def _debug_request(self, method, url, **kwargs):
+        _request_count[0] += 1
+        request_id = _request_count[0]
+        
         # Log request details (including proxy)
         proxy_info = getattr(self, '_proxy', None) or getattr(self, '_proxies', {}) or kwargs.get('proxy')
-        logger.debug(f"HTTPX Request: {method} {url} (proxy: {bool(proxy_info)})")
+        logger.info(f"🌐 HTTPX Request #{request_id}: {method} {url[:60]}... (proxy: {bool(proxy_info)})")
         
         try:
-            return _original_request(self, method, url, **kwargs)
+            result = _original_request(self, method, url, **kwargs)
+            logger.debug(f"✅ HTTPX Request #{request_id} succeeded: {result.status_code if hasattr(result, 'status_code') else 'OK'}")
+            return result
         except Exception as e:
             # Get proxy info from multiple sources
             proxy_info = (
                 getattr(self, '_proxy', None) or 
                 getattr(self, '_proxies', {}) or 
                 kwargs.get('proxy') or
+                getattr(self, 'transport', None) and hasattr(self.transport, '_proxy') or
                 "Not set"
             )
             
-            logger.error("=" * 60)
-            logger.error(f"❌ HTTPX Request failed:")
+            logger.error("=" * 70)
+            logger.error(f"❌ HTTPX Request #{request_id} FAILED:")
             logger.error(f"   Method: {method}")
             logger.error(f"   URL: {url}")
             logger.error(f"   Proxy configured: {bool(proxy_info) and proxy_info != 'Not set'}")
-            logger.error(f"   Proxy value: {str(proxy_info)[:50] if proxy_info != 'Not set' else 'Not set'}")
+            if proxy_info != "Not set":
+                proxy_str = str(proxy_info)
+                if len(proxy_str) > 50:
+                    proxy_str = proxy_str[:47] + "..."
+                logger.error(f"   Proxy value: {proxy_str}")
             logger.error(f"   Error type: {type(e).__name__}")
-            logger.error(f"   Error message: {str(e)[:200]}")
+            logger.error(f"   Error message: {str(e)[:300]}")
+            
+            # Check if it's a Cloudflare block
+            error_str = str(e).lower()
+            if "403" in error_str or "cloudflare" in error_str or "blocked" in error_str:
+                logger.error("   ⚠️  CLOUDflare BLOCKING DETECTED in httpx request!")
+            
             import traceback
             logger.error(f"   Full traceback:\n{traceback.format_exc()}")
-            logger.error("=" * 60)
+            logger.error("=" * 70)
             raise
     
     httpx.Client.request = _debug_request
-    logger.info("✅ Debug wrapper added to httpx.Client.request")
+    logger.info("✅ Debug wrapper added to httpx.Client.request (will log all requests)")
