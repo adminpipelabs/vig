@@ -498,6 +498,92 @@ def api_health():
         return {"status": "unhealthy", "error": str(e)}
 
 
+@app.get("/api/test-proxy")
+def api_test_proxy():
+    """Test Bright Data proxy connection - diagnose 403 issues"""
+    import httpx
+    from proxy_init import PROXY_URL
+    
+    results = {
+        "proxy_url": PROXY_URL.split("@")[-1] if "@" in PROXY_URL else "hidden",
+        "tests": []
+    }
+    
+    # Test 1: Bright Data test endpoint
+    try:
+        client = httpx.Client(proxy=PROXY_URL, trust_env=False, timeout=10.0)
+        resp = client.get("https://lumtest.com/myip.json", timeout=10.0)
+        client.close()
+        if resp.status_code == 200:
+            ip_info = resp.json()
+            results["tests"].append({
+                "test": "Bright Data test endpoint (lumtest.com)",
+                "status": "SUCCESS",
+                "status_code": resp.status_code,
+                "ip": ip_info.get("ip"),
+                "country": ip_info.get("country"),
+                "message": "Proxy authentication works!"
+            })
+        else:
+            results["tests"].append({
+                "test": "Bright Data test endpoint",
+                "status": "FAILED",
+                "status_code": resp.status_code,
+                "response": resp.text[:200],
+                "message": f"Bright Data returned {resp.status_code}"
+            })
+    except httpx.ProxyError as e:
+        results["tests"].append({
+            "test": "Bright Data test endpoint",
+            "status": "PROXY_ERROR",
+            "error": str(e),
+            "message": "Bright Data proxy rejected request (403 = auth/access issue)"
+        })
+    except Exception as e:
+        results["tests"].append({
+            "test": "Bright Data test endpoint",
+            "status": "ERROR",
+            "error": f"{type(e).__name__}: {str(e)}",
+            "message": "Network or configuration issue"
+        })
+    
+    # Test 2: Polymarket CLOB health
+    try:
+        client = httpx.Client(proxy=PROXY_URL, trust_env=False, timeout=10.0)
+        resp = client.get("https://clob.polymarket.com/health", timeout=10.0)
+        client.close()
+        if resp.status_code == 200:
+            results["tests"].append({
+                "test": "Polymarket CLOB health",
+                "status": "SUCCESS",
+                "status_code": resp.status_code,
+                "message": "Can reach Polymarket through proxy!"
+            })
+        else:
+            results["tests"].append({
+                "test": "Polymarket CLOB health",
+                "status": "FAILED",
+                "status_code": resp.status_code,
+                "response": resp.text[:200],
+                "message": f"Polymarket returned {resp.status_code}"
+            })
+    except httpx.ProxyError as e:
+        results["tests"].append({
+            "test": "Polymarket CLOB health",
+            "status": "PROXY_ERROR",
+            "error": str(e),
+            "message": "Proxy rejected request to Polymarket"
+        })
+    except Exception as e:
+        results["tests"].append({
+            "test": "Polymarket CLOB health",
+            "status": "ERROR",
+            "error": f"{type(e).__name__}: {str(e)}"
+        })
+    
+    return results
+
+
 @app.get("/api/debug/status")
 def debug_status():
     """Full system status for debugging"""
