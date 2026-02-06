@@ -221,19 +221,42 @@ def add_debug_wrapper():
             logger.error(f"❌ HTTPX Request #{request_id} FAILED:")
             logger.error(f"   Method: {method}")
             logger.error(f"   URL: {url}")
-            logger.error(f"   Proxy configured: {bool(proxy_info) and proxy_info != 'Not set'}")
-            if proxy_info != "Not set":
+            
+            # Better proxy detection
+            proxy_detected = False
+            proxy_str = "Not set"
+            if proxy_info and proxy_info != "Not set":
+                proxy_detected = True
                 proxy_str = str(proxy_info)
                 if len(proxy_str) > 50:
                     proxy_str = proxy_str[:47] + "..."
-                logger.error(f"   Proxy value: {proxy_str}")
+            else:
+                # Check transport for proxy
+                if hasattr(self, 'transport'):
+                    transport = self.transport
+                    if hasattr(transport, '_proxy'):
+                        proxy_detected = True
+                        proxy_str = str(transport._proxy)[:50]
+                    elif hasattr(transport, '_pool') and hasattr(transport._pool, '_proxy'):
+                        proxy_detected = True
+                        proxy_str = "Set in transport pool"
+            
+            logger.error(f"   Proxy configured: {proxy_detected}")
+            logger.error(f"   Proxy info: {proxy_str}")
             logger.error(f"   Error type: {type(e).__name__}")
             logger.error(f"   Error message: {str(e)[:300]}")
             
-            # Check if it's a Cloudflare block
+            # Check if it's a Cloudflare block or proxy auth issue
             error_str = str(e).lower()
-            if "403" in error_str or "cloudflare" in error_str or "blocked" in error_str:
-                logger.error("   ⚠️  CLOUDflare BLOCKING DETECTED in httpx request!")
+            if "403" in error_str:
+                if "proxy" in error_str:
+                    logger.error("   ⚠️  PROXY RETURNED 403 - Possible authentication issue or proxy IP blocked")
+                else:
+                    logger.error("   ⚠️  CLOUDflare BLOCKING DETECTED (403 Forbidden)")
+            elif "cloudflare" in error_str or "blocked" in error_str:
+                logger.error("   ⚠️  CLOUDflare BLOCKING DETECTED")
+            elif "401" in error_str or "unauthorized" in error_str:
+                logger.error("   ⚠️  PROXY AUTHENTICATION FAILED - Check username/password")
             
             import traceback
             logger.error(f"   Full traceback:\n{traceback.format_exc()}")
