@@ -9,6 +9,9 @@ from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 import httpx
+import logging
+
+logger = logging.getLogger("vig.dashboard")
 
 app = FastAPI(title="Vig Dashboard")
 
@@ -513,11 +516,87 @@ def api_bot_status():
     return status
 
 
+# Rate limiting for restart (prevent spam)
+_last_restart_time = {}
+RESTART_COOLDOWN_SECONDS = 60  # Minimum 60 seconds between restarts
+
+async def get_latest_deployment_id(railway_token: str, service_id: str) -> str | None:
+    """Get the latest deployment ID for this service."""
+    graphql_url = "https://backboard.railway.app/graphql/v2"
+    headers = {
+        "Authorization": f"Bearer {railway_token}",
+        "Content-Type": "application/json"
+    }
+    
+    query = """
+    query($serviceId: String!) {
+      deployments(first: 1, input: { serviceId: $serviceId }) {
+        edges {
+          node {
+            id
+            status
+          }
+        }
+      }
+    }
+    """
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                graphql_url,
+                json={"query": query, "variables": {"serviceId": service_id}},
+                headers=headers,
+                timeout=10
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                edges = data.get("data", {}).get("deployments", {}).get("edges", [])
+                if edges:
+                    return edges[0]["node"]["id"]
+    except Exception as e:
+        logger.error(f"Error getting deployment ID: {e}")
+    return None
+
+
+async def restart_deployment(railway_token: str, service_id: str) -> dict:
+    """Restart the current Railway deployment."""
+    deployment_id = await get_latest_deployment_id(railway_token, service_id)
+    if not deployment_id:
+        return {"success": False, "error": "Could not find deployment"}
+    
+    graphql_url = "https://backboard.railway.app/graphql/v2"
+    headers = {
+        "Authorization": f"Bearer {railway_token}",
+        "Content-Type": "application/json"
+    }
+    
+    mutation = """
+    mutation($id: String!) {
+      deploymentRestart(id: $id)
+    }
+    """
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                graphql_url,
+                json={"query": mutation, "variables": {"id": deployment_id}},
+                headers=headers,
+                timeout=10
+            )
+            if resp.status_code == 200:
+                return {"success": True, "deployment_id": deployment_id}
+            else:
+                return {"success": False, "error": f"Railway API returned {resp.status_code}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 @app.post("/api/bot-control")
-def api_bot_control(action: str):
+async def api_bot_control(action: str):
     """Control bot (start/stop/restart) using Railway API"""
-    import os
-    import httpx
+    import time
     
     result = {
         "status": "success",
@@ -527,71 +606,46 @@ def api_bot_control(action: str):
     
     try:
         if action == "restart":
-            # Try Railway GraphQL API first
-            railway_token = os.getenv("RAILWAY_TOKEN")
-            service_id = os.getenv("RAILWAY_SERVICE_ID")
-            
-            if railway_token and service_id:
-                try:
-                    # Get latest deployment ID for the service
-                    graphql_url = "https://backboard.railway.com/graphql/v2"
-                    headers = {
-                        "Authorization": f"Bearer {railway_token}",
-                        "Content-Type": "application/json"
-                    }
-                    
-                    # Query to get latest deployment
-                    query = """
-                    query {
-                      deployments(input: {serviceId: "%s", limit: 1}) {
-                        edges {
-                          node {
-                            id
-                            status
-                          }
-                        }
-                      }
-                    }
-                    """ % service_id
-                    
-                    # Get deployment ID
-                    resp = httpx.post(graphql_url, json={"query": query}, headers=headers, timeout=10)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        deployments = data.get("data", {}).get("deployments", {}).get("edges", [])
-                        if deployments:
-                            deployment_id = deployments[0]["node"]["id"]
-                            
-                            # Restart deployment
-                            restart_mutation = """
-                            mutation {
-                              deploymentRestart(id: "%s") {
-                                id
-                                status
-                              }
-                            }
-                            """ % deployment_id
-                            
-                            restart_resp = httpx.post(graphql_url, json={"query": restart_mutation}, headers=headers, timeout=10)
-                            if restart_resp.status_code == 200:
-                                result["message"] = "✅ Bot restart initiated via Railway API. This may take 30-60 seconds."
-                            else:
-                                result["status"] = "error"
-                                result["message"] = f"Railway API error: {restart_resp.status_code}. Please restart manually via Railway dashboard."
-                        else:
-                            result["status"] = "error"
-                            result["message"] = "Could not find deployment. Please restart manually via Railway dashboard."
-                    else:
-                        result["status"] = "error"
-                        result["message"] = f"Railway API error: {resp.status_code}. Please restart manually via Railway dashboard."
-                        
-                except Exception as e:
+            # Rate limiting - prevent spam restarts
+            import time
+            current_time = time.time()
+            if action in _last_restart_time:
+                time_since_last = current_time - _last_restart_time[action]
+                if time_since_last < RESTART_COOLDOWN_SECONDS:
+                    remaining = int(RESTART_COOLDOWN_SECONDS - time_since_last)
                     result["status"] = "error"
-                    result["message"] = f"Railway API error: {str(e)}. Please restart manually via Railway dashboard."
-            else:
-                # Fallback: Instructions
+                    result["message"] = f"⏳ Please wait {remaining} seconds before restarting again (rate limit)"
+                    return result
+            
+            # Railway auto-injects RAILWAY_SERVICE_ID, we only need RAILWAY_TOKEN
+            railway_token = os.getenv("RAILWAY_TOKEN", "")
+            service_id = os.getenv("RAILWAY_SERVICE_ID", "")  # Auto-injected by Railway
+            
+            if not railway_token:
                 result["status"] = "info"
-                result["message"] = "⚠️ Railway API not configured. To enable restart:\n1. Get Railway API token from https://railway.app/account\n2. Set RAILWAY_TOKEN env var\n3. Set RAILWAY_SERVICE_ID env var\n\nFor now, restart manually via Railway dashboard → Service → Restart"
+                result["message"] = "⚠️ Railway API not configured.\n\nTo enable restart:\n1. Go to https://railway.app/account → Tokens → Create Token\n2. Use a project-scoped token (not account-wide)\n3. Set RAILWAY_TOKEN environment variable in Railway\n4. Restart Railway service once to load the variable\n\nRAILWAY_SERVICE_ID is auto-injected by Railway (no need to set manually)"
+                return result
+            
+            if not service_id:
+                result["status"] = "error"
+                result["message"] = "⚠️ RAILWAY_SERVICE_ID not found. This should be auto-injected by Railway. Please check Railway dashboard."
+                return result
+            
+            # Log restart attempt (mask token for security)
+            token_display = railway_token[:10] + "..." if len(railway_token) > 10 else "***"
+            logger.info(f"Bot restart triggered from dashboard (token: {token_display})")
+            
+            # Restart deployment
+            restart_result = await restart_deployment(railway_token, service_id)
+            
+            if restart_result.get("success"):
+                _last_restart_time[action] = current_time
+                deployment_id = restart_result.get("deployment_id", "unknown")
+                result["message"] = f"✅ Bot restart initiated via Railway API.\n\nDeployment ID: {deployment_id[:20]}...\nThis may take 30-60 seconds."
+            else:
+                error = restart_result.get("error", "Unknown error")
+                result["status"] = "error"
+                result["message"] = f"❌ Failed to restart: {error}\n\nPlease restart manually via Railway dashboard → Service → Restart"
         
         elif action == "stop":
             result["status"] = "info"
@@ -606,6 +660,7 @@ def api_bot_control(action: str):
             result["message"] = f"Unknown action: {action}"
     
     except Exception as e:
+        logger.error(f"Error in bot control: {e}")
         result["status"] = "error"
         result["message"] = f"Error: {str(e)}"
     
@@ -1082,7 +1137,7 @@ canvas { width:100%!important; height:100%!important; }
         <p style="margin:0;"><strong>Trading Windows:</strong> Every 60 minutes | <strong>Markets:</strong> Polymarket (future: additional exchanges) | <strong>Strategy:</strong> Snowball with circuit breakers</p>
       </div>
       <div class="bot-controls" style="display:flex;gap:8px;flex-wrap:wrap;">
-        <button class="btn btn-cyan" id="restartBtn" onclick="controlBot('restart')" style="flex:1;min-width:120px;">🔄 Restart</button>
+        <button class="btn btn-cyan" id="restartBtn" onclick="confirmRestart()" style="flex:1;min-width:120px;">🔄 Restart</button>
         <button class="btn" id="stopBtn" onclick="controlBot('stop')" style="flex:1;min-width:120px;border-color:var(--red-dim);color:var(--red);">⏹ Stop</button>
         <button class="btn" id="startBtn" onclick="controlBot('start')" style="flex:1;min-width:120px;border-color:var(--green-dim);color:var(--green);">▶ Start</button>
       </div>
@@ -1427,6 +1482,12 @@ function updateBotStatus(status){
   }
   html+='</div>';
   content.innerHTML=html;
+}
+
+function confirmRestart(){
+  if(confirm('Are you sure you want to restart the bot?\n\nThis will restart the Railway service and may interrupt any active trading windows.')){
+    controlBot('restart');
+  }
 }
 
 async function controlBot(action){

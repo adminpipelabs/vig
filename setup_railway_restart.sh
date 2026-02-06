@@ -168,11 +168,7 @@ if [ "$SKIP_TOKEN" != "true" ]; then
 else
     echo "RAILWAY_TOKEN: (keeping existing)"
 fi
-if [ "$SKIP_SERVICE_ID" != "true" ]; then
-    echo "RAILWAY_SERVICE_ID: $RAILWAY_SERVICE_ID (will be set)"
-else
-    echo "RAILWAY_SERVICE_ID: (keeping existing)"
-fi
+echo "RAILWAY_SERVICE_ID: (auto-injected by Railway - no need to set)"
 echo ""
 
 # Confirmation
@@ -197,16 +193,9 @@ if [ "$SKIP_TOKEN" != "true" ]; then
     fi
 fi
 
-if [ "$SKIP_SERVICE_ID" != "true" ]; then
-    echo "Setting RAILWAY_SERVICE_ID..."
-    railway variables set RAILWAY_SERVICE_ID="$RAILWAY_SERVICE_ID" 2>&1
-    if [ $? -eq 0 ]; then
-        echo "✅ RAILWAY_SERVICE_ID set successfully"
-    else
-        echo "❌ Failed to set RAILWAY_SERVICE_ID"
-        exit 1
-    fi
-fi
+echo ""
+echo "ℹ️  RAILWAY_SERVICE_ID is automatically injected by Railway"
+echo "   No need to set it manually - Railway provides it automatically"
 
 echo ""
 echo "=========================================="
