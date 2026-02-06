@@ -11,6 +11,7 @@ automatically checks these environment variables.
 """
 import os
 import logging
+from urllib.parse import urlparse
 
 logger = logging.getLogger("vig.clob_proxy")
 
@@ -26,6 +27,41 @@ def setup_clob_proxy():
     proxy_url = os.getenv("RESIDENTIAL_PROXY_URL", "").strip()
     
     if proxy_url:
+        # Validate URL format
+        try:
+            parsed = urlparse(proxy_url)
+            if not parsed.scheme or not parsed.hostname:
+                raise ValueError("Invalid URL format: missing scheme or hostname")
+            
+            # Check for placeholder values
+            placeholder_keywords = ["user", "pass", "host", "port", "username", "password"]
+            proxy_lower = proxy_url.lower()
+            if any(keyword in proxy_lower and keyword not in ["http", "https"] for keyword in placeholder_keywords):
+                # Check if it's actually a placeholder (contains literal "port" or "host" as values)
+                if ":port" in proxy_lower or "@host" in proxy_lower or "user:pass" in proxy_lower:
+                    raise ValueError(
+                        "RESIDENTIAL_PROXY_URL appears to contain placeholder values. "
+                        "Please set a real proxy URL in format: http://username:password@proxy-host:port"
+                    )
+            
+            # Validate port if present
+            if parsed.port is None and ":" in parsed.netloc and "@" in parsed.netloc:
+                # URL has format user:pass@host:port, check if port part exists
+                netloc_after_at = parsed.netloc.split("@")[-1]
+                if ":" in netloc_after_at:
+                    port_part = netloc_after_at.split(":")[-1]
+                    if not port_part.isdigit() and port_part.lower() == "port":
+                        raise ValueError(
+                            "RESIDENTIAL_PROXY_URL has placeholder 'port' instead of actual port number. "
+                            "Format should be: http://username:password@proxy-host:22225"
+                        )
+            
+        except ValueError as e:
+            logger.error(f"Invalid RESIDENTIAL_PROXY_URL: {e}")
+            logger.error("Please set RESIDENTIAL_PROXY_URL to a valid proxy URL in Railway environment variables")
+            logger.error("Expected format: http://username:password@proxy-host:port")
+            raise
+        
         # Set environment variables that httpx will automatically use
         # Only set for this process - won't affect other httpx clients
         os.environ["HTTPS_PROXY"] = proxy_url
