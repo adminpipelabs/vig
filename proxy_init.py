@@ -10,20 +10,62 @@ This file must be imported first in main.py:
 import os
 import httpx
 
-PROXY_URL = os.getenv("RESIDENTIAL_PROXY_URL", "").strip()
+# Debug: Check ALL environment variables that might contain proxy info
+print("=" * 70)
+print("🔍 DEBUG: Checking for proxy environment variables...")
+proxy_env_vars = [
+    "RESIDENTIAL_PROXY_URL",
+    " RESIDENTIAL_PROXY_URL",  # Check for leading space (Railway quirk)
+    "RESIDENTIAL_PROXY_URL ",   # Check for trailing space
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "https_proxy",
+    "http_proxy",
+]
 
-# Debug: Log proxy URL format (redacted) for troubleshooting
+found_vars = {}
+for var_name in proxy_env_vars:
+    value = os.getenv(var_name, None)
+    if value:
+        found_vars[var_name] = value.strip()
+
+if found_vars:
+    print(f"✅ Found {len(found_vars)} proxy-related environment variable(s):")
+    for var_name, value in found_vars.items():
+        # Redact password for logging
+        if "@" in value:
+            parts = value.split("@")
+            if ":" in parts[0]:
+                user_pass = parts[0].split(":")
+                if len(user_pass) == 2:
+                    redacted = f"{user_pass[0]}:****@{parts[1]}"
+                    print(f"   {var_name} = {redacted}")
+                else:
+                    print(f"   {var_name} = {value[:50]}...")
+            else:
+                print(f"   {var_name} = {value[:50]}...")
+        else:
+            print(f"   {var_name} = {value[:50]}...")
+else:
+    print("❌ NO proxy environment variables found!")
+    print("   Checked: RESIDENTIAL_PROXY_URL, HTTPS_PROXY, HTTP_PROXY")
+print("=" * 70)
+
+# Get the proxy URL - prefer RESIDENTIAL_PROXY_URL, fallback to HTTPS_PROXY
+PROXY_URL = os.getenv("RESIDENTIAL_PROXY_URL", "").strip()
+if not PROXY_URL:
+    # Try with leading/trailing spaces (Railway quirk)
+    PROXY_URL = os.getenv(" RESIDENTIAL_PROXY_URL", "").strip()
+if not PROXY_URL:
+    PROXY_URL = os.getenv("RESIDENTIAL_PROXY_URL ", "").strip()
+if not PROXY_URL:
+    # Fallback to HTTPS_PROXY
+    PROXY_URL = os.getenv("HTTPS_PROXY", "").strip()
+
 if PROXY_URL:
-    # Redact password for logging
-    if "@" in PROXY_URL:
-        parts = PROXY_URL.split("@")
-        if ":" in parts[0]:
-            user_pass = parts[0].split(":")
-            if len(user_pass) == 2:
-                redacted = f"{user_pass[0]}:****@{parts[1]}"
-                print(f"🔍 PROXY URL FORMAT: {redacted}")
-    else:
-        print(f"🔍 PROXY URL FORMAT: {PROXY_URL[:50]}...")
+    print(f"✅ Using proxy URL: {PROXY_URL.split('@')[-1] if '@' in PROXY_URL else PROXY_URL[:50]}...")
+else:
+    print("⚠️  PROXY_URL is empty - no proxy will be used")
 
 
 def is_valid_proxy():
