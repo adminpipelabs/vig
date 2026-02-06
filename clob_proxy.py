@@ -33,16 +33,23 @@ def setup_clob_proxy():
             if not parsed.scheme or not parsed.hostname:
                 raise ValueError("Invalid URL format: missing scheme or hostname")
             
-            # Check for placeholder values
-            placeholder_keywords = ["user", "pass", "host", "port", "username", "password"]
+            # Check for placeholder values (only check for literal placeholders, not words that might be in real URLs)
             proxy_lower = proxy_url.lower()
-            if any(keyword in proxy_lower and keyword not in ["http", "https"] for keyword in placeholder_keywords):
-                # Check if it's actually a placeholder (contains literal "port" or "host" as values)
-                if ":port" in proxy_lower or "@host" in proxy_lower or "user:pass" in proxy_lower:
-                    raise ValueError(
-                        "RESIDENTIAL_PROXY_URL appears to contain placeholder values. "
-                        "Please set a real proxy URL in format: http://username:password@proxy-host:port"
-                    )
+            # Only flag if it contains literal placeholder patterns, not just the words
+            placeholder_patterns = [
+                ":port",           # Literal ":port" instead of ":22225"
+                "@host",           # Literal "@host" instead of "@proxy.example.com"
+                "user:pass",       # Literal "user:pass" (common placeholder)
+                "username:password",  # Literal "username:password"
+                "@example.com",    # Common placeholder domain
+                "@localhost",      # Localhost placeholder
+            ]
+            
+            if any(pattern in proxy_lower for pattern in placeholder_patterns):
+                raise ValueError(
+                    "RESIDENTIAL_PROXY_URL appears to contain placeholder values. "
+                    "Please set a real proxy URL in format: http://username:password@proxy-host:port"
+                )
             
             # Validate port if present
             if parsed.port is None and ":" in parsed.netloc and "@" in parsed.netloc:
@@ -55,6 +62,15 @@ def setup_clob_proxy():
                             "RESIDENTIAL_PROXY_URL has placeholder 'port' instead of actual port number. "
                             "Format should be: http://username:password@proxy-host:22225"
                         )
+            
+            # Additional check: if URL contains common placeholder patterns in the hostname
+            if parsed.hostname:
+                hostname_lower = parsed.hostname.lower()
+                if hostname_lower in ["host", "proxy-host", "example.com", "localhost", "127.0.0.1"]:
+                    raise ValueError(
+                        "RESIDENTIAL_PROXY_URL appears to contain placeholder hostname. "
+                        "Please set a real proxy hostname from your proxy provider."
+                    )
             
         except ValueError as e:
             logger.error(f"Invalid RESIDENTIAL_PROXY_URL: {e}")

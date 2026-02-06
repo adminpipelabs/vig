@@ -20,8 +20,11 @@ class BetManager:
         self.db = db
         self.snowball = snowball
         self.clob_client = clob_client
+        self._cloudflare_error_logged = False  # Track if we've already logged Cloudflare error this window
 
     def place_bets(self, candidates, window_id, clip_multiplier=1.0):
+        # Reset Cloudflare error flag for new window
+        self._cloudflare_error_logged = False
         bets = []
         
         # Get current balance for live trading
@@ -67,6 +70,7 @@ class BetManager:
             else:
                 order_id = self._place_live_order(market, clip, size)
                 if not order_id:
+                    # Order failed - already logged in _place_live_order
                     continue
                 bet.order_id = order_id
                 logger.info(f"LIVE: {bet.side} {market.question[:50]} @ ${bet.price:.2f} -- ${bet.amount:.2f}")
@@ -94,18 +98,24 @@ class BetManager:
             error_str = str(e)
             # Check for Cloudflare blocking
             if "403" in error_str or "Cloudflare" in error_str or "blocked" in error_str.lower():
-                logger.error("=" * 60)
-                logger.error("❌ CLOUDflare BLOCKING DETECTED")
-                logger.error("CLOB API requests are being blocked by Cloudflare.")
-                logger.error("This means RESIDENTIAL_PROXY_URL is either:")
-                logger.error("  1. Not set correctly")
-                logger.error("  2. Not working (proxy server down/invalid)")
-                logger.error("  3. Proxy itself is blocked")
-                logger.error("=" * 60)
-                logger.error("Check Railway environment variables:")
-                logger.error("  - RESIDENTIAL_PROXY_URL should be: http://user:pass@proxy-host:port")
-                logger.error("  - Verify proxy is working by testing it manually")
-                logger.error("=" * 60)
+                # Only log detailed error once per window to reduce spam
+                if not self._cloudflare_error_logged:
+                    logger.error("=" * 60)
+                    logger.error("❌ CLOUDflare BLOCKING DETECTED")
+                    logger.error("CLOB API requests are being blocked by Cloudflare.")
+                    logger.error("This means RESIDENTIAL_PROXY_URL is either:")
+                    logger.error("  1. Not set correctly (contains placeholder values)")
+                    logger.error("  2. Not working (proxy server down/invalid)")
+                    logger.error("  3. Proxy itself is blocked")
+                    logger.error("=" * 60)
+                    logger.error("Check Railway environment variables:")
+                    logger.error("  - RESIDENTIAL_PROXY_URL should be: http://username:password@proxy-host:port")
+                    logger.error("  - Verify proxy is working by testing it manually")
+                    logger.error("=" * 60)
+                    self._cloudflare_error_logged = True
+                else:
+                    # Subsequent errors - just log briefly
+                    logger.debug("Order failed: Cloudflare blocking (403)")
             else:
                 logger.error(f"Order failed: {e}")
             return None
