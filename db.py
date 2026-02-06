@@ -311,12 +311,16 @@ class Database:
         return WindowRecord(**{k: row[k] for k in row.keys()}) if row else None
 
     def get_recent_windows(self, n: int = 20) -> list[WindowRecord]:
-        c = self.conn.cursor()
         if self.use_postgres:
+            from psycopg2.extras import RealDictCursor
+            c = self.conn.cursor(cursor_factory=RealDictCursor)
             c.execute("SELECT * FROM windows ORDER BY id DESC LIMIT %s", (n,))
         else:
+            c = self.conn.cursor()
             c.execute("SELECT * FROM windows ORDER BY id DESC LIMIT ?", (n,))
-        return [WindowRecord(**{k: row[k] for k in row.keys()}) for row in c.fetchall()]
+        rows = c.fetchall()
+        # Convert to dict if needed (PostgreSQL RealDictRow is already dict-like, SQLite Row is dict-like)
+        return [WindowRecord(**dict(row)) for row in rows]
 
     def log_circuit_breaker(self, reason: str, clip: float, action: str):
         now = datetime.now(timezone.utc).isoformat()
