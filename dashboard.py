@@ -466,6 +466,25 @@ def api_pnl_flow():
     }
 
 
+@app.get("/api/health")
+def api_health():
+    """Simple health check endpoint"""
+    try:
+        conn = get_db()
+        # Quick database check
+        if is_postgres(conn):
+            from psycopg2.extras import RealDictCursor
+            c = conn.cursor(cursor_factory=RealDictCursor)
+        else:
+            c = conn.cursor()
+        c.execute("SELECT 1")
+        c.fetchone()
+        conn.close()
+        return {"status": "healthy", "database": "connected"}
+    except Exception as e:
+        return {"status": "unhealthy", "error": str(e)}
+
+
 @app.get("/api/bot-status")
 def api_bot_status():
     """Get bot status and activity"""
@@ -1277,7 +1296,7 @@ async function loadPnlFlow() {
 }
 let lastWindowAt=null;
 
-async function fetchJSON(u){try{const r=await fetch(u);return await r.json()}catch(e){return null}}
+async function fetchJSON(u){try{const r=await fetch(u);if(!r.ok){console.error(`API error ${r.status}: ${u}`);return null;}return await r.json()}catch(e){console.error(`Fetch error for ${u}:`,e);return null}}
 function fmt(n){if(n==null)return'--';const sign=n>=0?'+':'-';return sign+'$'+Math.abs(n).toFixed(2)}
 function timeAgo(iso){if(!iso)return'--';const d=new Date(iso),s=(Date.now()-d.getTime())/1000;if(s<60)return Math.floor(s)+'s ago';if(s<3600){const m=Math.floor(s/60);return m+'m ago';}if(s<172800){const h=Math.floor(s/3600),m=Math.floor((s%3600)/60);if(m===0)return h+'h ago';return h+'h '+m+'m ago';}return Math.floor(s/86400)+'d ago'}
 
@@ -1336,14 +1355,18 @@ async function runScan(){
 }
 
 async function refresh(){
-  const[stats,windows,bets,curve,pending,botStatus]=await Promise.all([
-    fetchJSON('/api/stats'),fetchJSON('/api/windows?limit=20'),
-    fetchJSON('/api/bets?limit=30'),fetchJSON('/api/equity-curve'),
-    fetchJSON('/api/pending'),fetchJSON('/api/bot-status'),
-  ]);
-  
-  // Update bot status
-  updateBotStatus(botStatus);
+  try{
+    const[stats,windows,bets,curve,pending,botStatus]=await Promise.all([
+      fetchJSON('/api/stats').catch(e=>{console.error('Stats error:',e);return null;}),
+      fetchJSON('/api/windows?limit=20').catch(e=>{console.error('Windows error:',e);return null;}),
+      fetchJSON('/api/bets?limit=30').catch(e=>{console.error('Bets error:',e);return null;}),
+      fetchJSON('/api/equity-curve').catch(e=>{console.error('Curve error:',e);return null;}),
+      fetchJSON('/api/pending').catch(e=>{console.error('Pending error:',e);return null;}),
+      fetchJSON('/api/bot-status').catch(e=>{console.error('Bot status error:',e);return null;}),
+    ]);
+    
+    // Update bot status
+    updateBotStatus(botStatus);
 
   // Status
   const b=document.getElementById('statusBadge'),st=document.getElementById('statusText');
