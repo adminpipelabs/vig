@@ -6,14 +6,20 @@ MUST be imported FIRST in main.py. Does two things:
 """
 import os
 import httpx
+from urllib.parse import quote
 
 # Unset env proxy vars so nothing overrides our proxy (httpx uses them when trust_env=True)
 for key in list(os.environ.keys()):
     if key.upper() in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY"):
         del os.environ[key]
 
-# Hardcoded proxy — bot must trade; env var was not reliably read on Railway
-PROXY_URL = "http://brd-customer-hl_b4689439-zone-residential_proxy1:5teowbs6s9c9@brd.superproxy.io:33335"
+# Hardcoded proxy — bot must trade; env var was not reliably read on Railway.
+# Format: http://user:pass@host:port — password URL-encoded in case of special chars.
+# If you get ProxyError 403: check Bright Data dashboard (credentials, zone active, balance).
+_proxy_user = "brd-customer-hl_b4689439-zone-residential_proxy1"
+_proxy_pass = "5teowbs6s9c9"
+_proxy_host = "brd.superproxy.io:33335"
+PROXY_URL = f"http://{_proxy_user}:{quote(_proxy_pass, safe='')}@{_proxy_host}"
 
 # Allow override from env if set (so we can switch back later without code change)
 _env_proxy = os.getenv("RESIDENTIAL_PROXY_URL", "").strip()
@@ -68,7 +74,7 @@ if _is_valid_proxy():
         _helpers._http_client = httpx.Client(
             proxy=PROXY_URL,
             trust_env=False,
-            http2=True,
+            http2=False,  # HTTP/1.1 only — some proxies handle it more reliably
             timeout=30.0,
             headers={
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
