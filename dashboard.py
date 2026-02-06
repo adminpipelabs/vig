@@ -479,10 +479,89 @@ def api_health():
             c = conn.cursor()
         c.execute("SELECT 1")
         c.fetchone()
+        
+        # Get row counts
+        c.execute("SELECT COUNT(*) as cnt FROM bets")
+        bets_count = dict(c.fetchone()).get("cnt", 0) if c.fetchone() else 0
+        
+        c.execute("SELECT COUNT(*) as cnt FROM windows")
+        windows_count = dict(c.fetchone()).get("cnt", 0) if c.fetchone() else 0
+        
         conn.close()
-        return {"status": "healthy", "database": "connected"}
+        return {
+            "status": "healthy",
+            "database": "connected",
+            "bets_count": bets_count,
+            "windows_count": windows_count
+        }
     except Exception as e:
         return {"status": "unhealthy", "error": str(e)}
+
+
+@app.get("/api/debug/status")
+def debug_status():
+    """Full system status for debugging"""
+    import os
+    
+    status = {
+        "environment": {
+            "PAPER_MODE": os.getenv("PAPER_MODE", "not set"),
+            "DATABASE_URL_SET": bool(os.getenv("DATABASE_URL")),
+            "RESIDENTIAL_PROXY_SET": bool(os.getenv("RESIDENTIAL_PROXY_URL")),
+            "RAILWAY_SERVICE_ID": os.getenv("RAILWAY_SERVICE_ID", "not set"),
+            "RAILWAY_TOKEN_SET": bool(os.getenv("RAILWAY_TOKEN")),
+        },
+        "database": {},
+        "last_window": None,
+        "last_bet": None,
+    }
+    
+    # Check database
+    try:
+        conn = get_db()
+        if is_postgres(conn):
+            from psycopg2.extras import RealDictCursor
+            c = conn.cursor(cursor_factory=RealDictCursor)
+        else:
+            c = conn.cursor()
+        
+        # Row counts
+        for table in ["bets", "windows"]:
+            if is_postgres(conn):
+                c.execute(f"SELECT COUNT(*) as cnt FROM {table}")
+            else:
+                c.execute(f"SELECT COUNT(*) as cnt FROM {table}")
+            row = c.fetchone()
+            if row:
+                row_dict = dict(row) if not isinstance(row, dict) else row
+                status["database"][table] = row_dict.get("cnt", 0)
+        
+        # Last window
+        if is_postgres(conn):
+            c.execute("SELECT * FROM windows ORDER BY started_at DESC LIMIT 1")
+        else:
+            c.execute("SELECT * FROM windows ORDER BY started_at DESC LIMIT 1")
+        row = c.fetchone()
+        if row:
+            status["last_window"] = dict(row) if not isinstance(row, dict) else dict(row)
+        
+        # Last bet
+        if is_postgres(conn):
+            c.execute("SELECT * FROM bets ORDER BY placed_at DESC LIMIT 1")
+        else:
+            c.execute("SELECT * FROM bets ORDER BY placed_at DESC LIMIT 1")
+        row = c.fetchone()
+        if row:
+            status["last_bet"] = dict(row) if not isinstance(row, dict) else dict(row)
+            
+        status["database"]["status"] = "connected"
+        conn.close()
+    except Exception as e:
+        status["database"]["status"] = f"error: {str(e)}"
+        import traceback
+        status["database"]["traceback"] = traceback.format_exc()
+    
+    return status
 
 
 @app.get("/api/bot-status")
