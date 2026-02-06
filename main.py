@@ -10,6 +10,16 @@ import random
 from datetime import datetime, timezone
 
 from datetime import datetime, timezone
+
+# CRITICAL: Patch py_clob_client BEFORE importing anything that uses it
+# This must happen before ClobClient is imported anywhere
+from clob_proxy_patch import patch_clob_globally, add_debug_wrapper
+
+# Patch py_clob_client to use proxy (must be before any ClobClient imports)
+if os.getenv("RESIDENTIAL_PROXY_URL", "").strip():
+    patch_clob_globally()
+    add_debug_wrapper()  # Temporary: helps diagnose connection issues
+
 from config import Config
 from db import Database, WindowRecord
 from scanner import Scanner
@@ -69,66 +79,46 @@ def main():
     risk_mgr = RiskManager(config, db)
     notifier = Notifier(config)
 
-    # CLOB client only for live mode - try multiple strategies
+    # CLOB client only for live mode
+    # Note: py_clob_client is already patched at module level (see top of file)
     clob_client = None
     if not config.paper_mode:
-        residential_proxy = os.getenv("RESIDENTIAL_PROXY_URL", "").strip()
-        
-        # Strategy 1: Try proxy if configured
-        if residential_proxy:
-            try:
-                logger.info("Attempting CLOB client initialization with residential proxy...")
-                from clob_proxy import get_clob_client_with_proxy
-                host = config.clob_url
-                key = config.private_key
-                chain_id = config.chain_id
-                clob_client = get_clob_client_with_proxy(host, key=key, chain_id=chain_id)
-                
-                # Test the connection by creating API creds (this makes an HTTP request)
-                logger.info("Testing proxy connection by creating API credentials...")
-                creds = clob_client.create_or_derive_api_creds()
-                clob_client.set_api_creds(creds)
-                logger.info("✅ CLOB client initialized with residential proxy")
-            except Exception as e:
-                import traceback
-                error_details = traceback.format_exc()
-                logger.warning(f"⚠️  Proxy initialization failed: {e}")
-                logger.debug(f"Full error traceback:\n{error_details}")
-                
-                # Check for specific error types
-                error_str = str(e).lower()
-                if "timeout" in error_str or "connection" in error_str:
-                    logger.error("Proxy connection failed - check if proxy server is accessible")
-                elif "ssl" in error_str or "certificate" in error_str:
-                    logger.error("SSL/TLS error - proxy might need different SSL settings")
-                elif "403" in error_str or "401" in error_str:
-                    logger.error("Proxy authentication failed - check username/password")
-                else:
-                    logger.error(f"Unknown proxy error: {e}")
-                
-                logger.info("Falling back to direct connection...")
-                clob_client = None
-        
-        # Strategy 2: Try direct connection (if proxy failed or not configured)
-        if clob_client is None:
-            try:
-                logger.info("Attempting CLOB client initialization with direct connection...")
-                from py_clob_client.client import ClobClient
-                host = config.clob_url
-                key = config.private_key
-                chain_id = config.chain_id
-                clob_client = ClobClient(host, key=key, chain_id=chain_id)
-                creds = clob_client.create_or_derive_api_creds()
-                clob_client.set_api_creds(creds)
-                logger.info("✅ CLOB client initialized (direct connection)")
-            except Exception as e:
-                logger.warning(f"⚠️  Direct connection failed: {e}")
-                logger.warning("⚠️  Running in SCAN-ONLY mode - will scan markets but cannot place bets")
-                logger.warning("⚠️  Fix RESIDENTIAL_PROXY_URL or check CLOB API connectivity")
-                clob_client = None
-        
-        # Final check: Warn if still no client
-        if clob_client is None:
+        try:
+            logger.info("Initializing CLOB client (proxy already patched if RESIDENTIAL_PROXY_URL is set)...")
+            from py_clob_client.client import ClobClient
+            
+            host = config.clob_url
+            key = config.private_key
+            chain_id = config.chain_id
+            
+            # Create client - proxy is already patched globally if RESIDENTIAL_PROXY_URL is set
+            clob_client = ClobClient(host, key=key, chain_id=chain_id)
+            
+            # Test the connection by creating API creds (this makes an HTTP request)
+            logger.info("Testing CLOB connection by creating API credentials...")
+            creds = clob_client.create_or_derive_api_creds()
+            clob_client.set_api_creds(creds)
+            
+            proxy_status = "with residential proxy" if os.getenv("RESIDENTIAL_PROXY_URL", "").strip() else "direct connection"
+            logger.info(f"✅ CLOB client initialized ({proxy_status})")
+            
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            logger.error(f"❌ CLOB client initialization failed: {e}")
+            logger.error(f"Full error traceback:\n{error_details}")
+            
+            # Check for specific error types
+            error_str = str(e).lower()
+            if "timeout" in error_str or "connection" in error_str:
+                logger.error("Connection failed - check proxy server accessibility or network connectivity")
+            elif "ssl" in error_str or "certificate" in error_str:
+                logger.error("SSL/TLS error - proxy might need different SSL settings")
+            elif "403" in error_str or "401" in error_str or "cloudflare" in error_str:
+                logger.error("Request blocked - proxy may not be working correctly")
+            else:
+                logger.error(f"Unknown error: {e}")
+            
             logger.error("=" * 60)
             logger.error("⚠️  CLOB CLIENT NOT AVAILABLE")
             logger.error("Bot will run in SCAN-ONLY mode:")
@@ -137,9 +127,11 @@ def main():
             logger.error("  - ✅ Dashboard will show scanning activity")
             logger.error("=" * 60)
             logger.error("To enable betting:")
-            logger.error("  1. Set valid RESIDENTIAL_PROXY_URL in Railway")
-            logger.error("  2. Or ensure direct CLOB API access works")
+            logger.error("  1. Verify RESIDENTIAL_PROXY_URL is set correctly in Railway")
+            logger.error("  2. Check proxy is accessible and working")
+            logger.error("  3. Review error details above for specific issue")
             logger.error("=" * 60)
+            clob_client = None
 
     bet_mgr = BetManager(config, db, snowball, clob_client)
 
