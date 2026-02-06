@@ -80,7 +80,10 @@ if _is_valid_proxy():
         )
 
     _display = PROXY_URL.split("@")[-1] if "@" in PROXY_URL else PROXY_URL[:40]
+    # Use both print and logging to ensure Railway captures it
     print(f"PROXY ACTIVE: {_display}")
+    import sys
+    sys.stdout.flush()  # Force output
     
     # Test proxy connection at startup - BLOCKING so we see results immediately
     # Use print() since logging might not be initialized yet when proxy_init runs
