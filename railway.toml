@@ -1,2 +1,5 @@
-# Railway will auto-detect Dockerfile and use it
-# This bypasses nixpacks/mise SSL certificate issues
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "uvicorn dashboard:app --host 0.0.0.0 --port $PORT"
