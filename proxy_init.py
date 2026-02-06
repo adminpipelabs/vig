@@ -82,35 +82,71 @@ if _is_valid_proxy():
     _display = PROXY_URL.split("@")[-1] if "@" in PROXY_URL else PROXY_URL[:40]
     print(f"PROXY ACTIVE: {_display}")
     
-    # Test proxy connection at startup (use logging so Railway captures it)
+    # Test proxy connection at startup - BLOCKING so we see results immediately
     import logging
-    import threading
     _logger = logging.getLogger("vig.proxy")
     
     def _test_proxy():
+        _logger.info("=" * 70)
+        _logger.info("TESTING BRIGHT DATA PROXY CONNECTION...")
+        _logger.info(f"Proxy URL: {PROXY_URL.split('@')[-1] if '@' in PROXY_URL else 'hidden'}")
+        
+        # Test 1: Bright Data test endpoint
         try:
-            _logger.info("Testing Bright Data proxy connection...")
+            _logger.info("Test 1: Connecting to Bright Data test endpoint (lumtest.com)...")
             test_client = httpx.Client(proxy=PROXY_URL, trust_env=False, timeout=10.0)
             resp = test_client.get("https://lumtest.com/myip.json", timeout=10.0)
             test_client.close()
             if resp.status_code == 200:
                 ip_info = resp.json()
-                _logger.info(f"✅ Proxy test SUCCESS: Connected to Bright Data")
-                _logger.info(f"   IP: {ip_info.get('ip', 'unknown')}")
+                _logger.info("=" * 70)
+                _logger.info("✅ PROXY TEST SUCCESS!")
+                _logger.info(f"   Connected to Bright Data successfully")
+                _logger.info(f"   Proxy IP: {ip_info.get('ip', 'unknown')}")
                 _logger.info(f"   Country: {ip_info.get('country', 'unknown')}")
-                _logger.info(f"   This means proxy auth is working!")
+                _logger.info(f"   This means proxy authentication WORKS!")
+                _logger.info("=" * 70)
             else:
-                _logger.error(f"❌ Proxy test FAILED: Bright Data returned {resp.status_code}")
-                _logger.error(f"   This indicates Bright Data auth/access issue")
+                _logger.error("=" * 70)
+                _logger.error(f"❌ PROXY TEST FAILED: Bright Data returned {resp.status_code}")
+                _logger.error(f"   Response: {resp.text[:200]}")
+                _logger.error("=" * 70)
         except httpx.ProxyError as e:
-            _logger.error(f"❌ Proxy test FAILED: ProxyError - {e}")
-            _logger.error(f"   Bright Data proxy is rejecting requests (likely 403 = auth/access issue)")
-            _logger.error(f"   Check: Zone active, account balance, trial restrictions")
+            error_str = str(e)
+            _logger.error("=" * 70)
+            _logger.error("❌ PROXY TEST FAILED: ProxyError")
+            _logger.error(f"   Error: {error_str}")
+            if "403" in error_str:
+                _logger.error("   ⚠️  403 Forbidden = Bright Data is rejecting requests")
+                _logger.error("   Possible causes:")
+                _logger.error("   1. Wrong credentials (but curl works, so unlikely)")
+                _logger.error("   2. Zone suspended or inactive (check dashboard)")
+                _logger.error("   3. Account balance empty (check dashboard)")
+                _logger.error("   4. Trial account restrictions (no proof, but possible)")
+                _logger.error("   5. Railway IP blocked by Bright Data (contact support)")
+            _logger.error("=" * 70)
         except Exception as e:
-            _logger.error(f"❌ Proxy test FAILED: {type(e).__name__} - {e}")
-            _logger.error(f"   This might indicate network or configuration issue")
+            _logger.error("=" * 70)
+            _logger.error(f"❌ PROXY TEST FAILED: {type(e).__name__}")
+            _logger.error(f"   Error: {str(e)}")
+            _logger.error("=" * 70)
+        
+        # Test 2: Polymarket CLOB (if test 1 succeeded)
+        try:
+            _logger.info("Test 2: Testing Polymarket CLOB through proxy...")
+            test_client = httpx.Client(proxy=PROXY_URL, trust_env=False, timeout=10.0)
+            resp = test_client.get("https://clob.polymarket.com/health", timeout=10.0)
+            test_client.close()
+            if resp.status_code == 200:
+                _logger.info("✅ Polymarket CLOB accessible through proxy!")
+            else:
+                _logger.warning(f"⚠️  Polymarket returned {resp.status_code}: {resp.text[:100]}")
+        except httpx.ProxyError as e:
+            _logger.error(f"❌ Polymarket CLOB blocked: ProxyError - {e}")
+        except Exception as e:
+            _logger.warning(f"⚠️  Polymarket test error: {e}")
     
-    # Run test in background (don't block startup)
-    threading.Thread(target=_test_proxy, daemon=True).start()
+    # Run test immediately (blocking) so we see results in logs
+    _test_proxy()
 else:
     print("NO PROXY: RESIDENTIAL_PROXY_URL invalid or unset")
