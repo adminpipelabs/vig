@@ -57,7 +57,6 @@ echo ""
 # Check existing variables
 echo "Checking existing environment variables..."
 RAILWAY_TOKEN_EXISTS=$(railway variables --json 2>/dev/null | grep -c "RAILWAY_TOKEN" || echo "0")
-RAILWAY_SERVICE_ID_EXISTS=$(railway variables --json 2>/dev/null | grep -c "RAILWAY_SERVICE_ID" || echo "0")
 
 if [ "$RAILWAY_TOKEN_EXISTS" -gt 0 ]; then
     echo "⚠️  RAILWAY_TOKEN already exists"
@@ -72,19 +71,9 @@ else
     SKIP_TOKEN=false
 fi
 
-if [ "$RAILWAY_SERVICE_ID_EXISTS" -gt 0 ]; then
-    echo "⚠️  RAILWAY_SERVICE_ID already exists"
-    read -p "   Do you want to update it? (y/N): " UPDATE_SERVICE_ID
-    if [[ ! "$UPDATE_SERVICE_ID" =~ ^[Yy]$ ]]; then
-        echo "   Skipping RAILWAY_SERVICE_ID (keeping existing value)"
-        SKIP_SERVICE_ID=true
-    else
-        SKIP_SERVICE_ID=false
-    fi
-else
-    SKIP_SERVICE_ID=false
-fi
-
+echo ""
+echo "ℹ️  Note: RAILWAY_SERVICE_ID is automatically injected by Railway"
+echo "   You don't need to set it manually - Railway does this for you."
 echo ""
 
 # Get Railway API Token
