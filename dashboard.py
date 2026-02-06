@@ -720,18 +720,20 @@ async def api_bot_control(action: str):
                     result["message"] = f"⏳ Please wait {remaining} seconds before restarting again (rate limit)"
                     return result
             
-            # Railway auto-injects RAILWAY_SERVICE_ID, we only need RAILWAY_TOKEN
+            # Railway auto-injects RAILWAY_SERVICE_ID for the current service
+            # For bot restart, we need BOT_RAILWAY_SERVICE_ID (bot service) or fallback to RAILWAY_SERVICE_ID
             railway_token = os.getenv("RAILWAY_TOKEN", "")
-            service_id = os.getenv("RAILWAY_SERVICE_ID", "")  # Auto-injected by Railway
+            # Prefer BOT_RAILWAY_SERVICE_ID if set (for split services), otherwise use current service ID
+            service_id = os.getenv("BOT_RAILWAY_SERVICE_ID") or os.getenv("RAILWAY_SERVICE_ID", "")
             
             if not railway_token:
                 result["status"] = "info"
-                result["message"] = "⚠️ Railway API not configured.\n\nTo enable restart:\n1. Go to https://railway.app/account → Tokens → Create Token\n2. Use a project-scoped token (not account-wide)\n3. Set RAILWAY_TOKEN environment variable in Railway\n4. Restart Railway service once to load the variable\n\nRAILWAY_SERVICE_ID is auto-injected by Railway (no need to set manually)"
+                result["message"] = "⚠️ Railway API not configured.\n\nTo enable restart:\n1. Go to https://railway.app/account → Tokens → Create Token\n2. Use a project-scoped token (not account-wide)\n3. Set RAILWAY_TOKEN environment variable in Railway\n4. Set BOT_RAILWAY_SERVICE_ID to bot service ID (if services are split)\n5. Restart Railway service once to load the variable"
                 return result
             
             if not service_id:
                 result["status"] = "error"
-                result["message"] = "⚠️ RAILWAY_SERVICE_ID not found. This should be auto-injected by Railway. Please check Railway dashboard."
+                result["message"] = "⚠️ Service ID not found.\n\nIf services are split:\n- Set BOT_RAILWAY_SERVICE_ID to bot service ID\n- Or set RAILWAY_SERVICE_ID (auto-injected if bot and dashboard are same service)"
                 return result
             
             # Log restart attempt (mask token for security)
