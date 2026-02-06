@@ -82,22 +82,35 @@ if _is_valid_proxy():
     _display = PROXY_URL.split("@")[-1] if "@" in PROXY_URL else PROXY_URL[:40]
     print(f"PROXY ACTIVE: {_display}")
     
-    # Test proxy connection at startup (non-blocking, just logs)
+    # Test proxy connection at startup (use logging so Railway captures it)
+    import logging
+    import threading
+    _logger = logging.getLogger("vig.proxy")
+    
     def _test_proxy():
         try:
-            test_client = httpx.Client(proxy=PROXY_URL, trust_env=False, timeout=5.0)
-            resp = test_client.get("https://lumtest.com/myip.json", timeout=5.0)
+            _logger.info("Testing Bright Data proxy connection...")
+            test_client = httpx.Client(proxy=PROXY_URL, trust_env=False, timeout=10.0)
+            resp = test_client.get("https://lumtest.com/myip.json", timeout=10.0)
             test_client.close()
             if resp.status_code == 200:
-                print(f"✅ Proxy test: Connected to Bright Data (IP: {resp.json().get('ip', 'unknown')})")
+                ip_info = resp.json()
+                _logger.info(f"✅ Proxy test SUCCESS: Connected to Bright Data")
+                _logger.info(f"   IP: {ip_info.get('ip', 'unknown')}")
+                _logger.info(f"   Country: {ip_info.get('country', 'unknown')}")
+                _logger.info(f"   This means proxy auth is working!")
             else:
-                print(f"⚠️  Proxy test: Bright Data returned {resp.status_code}")
+                _logger.error(f"❌ Proxy test FAILED: Bright Data returned {resp.status_code}")
+                _logger.error(f"   This indicates Bright Data auth/access issue")
+        except httpx.ProxyError as e:
+            _logger.error(f"❌ Proxy test FAILED: ProxyError - {e}")
+            _logger.error(f"   Bright Data proxy is rejecting requests (likely 403 = auth/access issue)")
+            _logger.error(f"   Check: Zone active, account balance, trial restrictions")
         except Exception as e:
-            print(f"⚠️  Proxy test failed: {e}")
-            print("   This might indicate Bright Data auth issue or network problem")
+            _logger.error(f"❌ Proxy test FAILED: {type(e).__name__} - {e}")
+            _logger.error(f"   This might indicate network or configuration issue")
     
     # Run test in background (don't block startup)
-    import threading
     threading.Thread(target=_test_proxy, daemon=True).start()
 else:
     print("NO PROXY: RESIDENTIAL_PROXY_URL invalid or unset")
