@@ -192,8 +192,16 @@ def add_debug_wrapper():
         request_id = _request_count[0]
         
         # Log request details (including proxy)
-        proxy_info = getattr(self, '_proxy', None) or getattr(self, '_proxies', {}) or kwargs.get('proxy')
-        logger.info(f"🌐 HTTPX Request #{request_id}: {method} {url[:60]}... (proxy: {bool(proxy_info)})")
+        # Check multiple ways proxy might be stored
+        proxy_info = (
+            getattr(self, '_proxy', None) or 
+            getattr(self, '_proxies', {}) or 
+            kwargs.get('proxy') or
+            (hasattr(self, 'transport') and getattr(self.transport, '_proxy', None)) or
+            None
+        )
+        proxy_set = bool(proxy_info)
+        logger.info(f"🌐 HTTPX Request #{request_id}: {method} {url[:60]}... (proxy: {proxy_set})")
         
         try:
             result = _original_request(self, method, url, **kwargs)

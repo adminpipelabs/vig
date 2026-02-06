@@ -38,14 +38,30 @@ if is_valid_proxy():
         """httpx.Client with automatic proxy injection"""
         def __init__(self, *args, **kwargs):
             # Always inject proxy if not already set
-            kwargs.setdefault('proxy', PROXY_URL)
+            # Use proxies dict format for better compatibility
+            if 'proxy' not in kwargs and 'proxies' not in kwargs:
+                kwargs['proxy'] = PROXY_URL
+            elif 'proxies' not in kwargs:
+                # Convert single proxy to proxies dict
+                kwargs['proxies'] = {
+                    'http://': PROXY_URL,
+                    'https://': PROXY_URL
+                }
+                kwargs.pop('proxy', None)
             super().__init__(*args, **kwargs)
     
     class ProxiedAsyncClient(_OriginalAsyncClient):
         """httpx.AsyncClient with automatic proxy injection"""
         def __init__(self, *args, **kwargs):
             # Always inject proxy if not already set
-            kwargs.setdefault('proxy', PROXY_URL)
+            if 'proxy' not in kwargs and 'proxies' not in kwargs:
+                kwargs['proxy'] = PROXY_URL
+            elif 'proxies' not in kwargs:
+                kwargs['proxies'] = {
+                    'http://': PROXY_URL,
+                    'https://': PROXY_URL
+                }
+                kwargs.pop('proxy', None)
             super().__init__(*args, **kwargs)
     
     # Replace httpx classes
