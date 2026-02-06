@@ -22,10 +22,11 @@ def get_db():
     if DATABASE_URL:
         try:
             import psycopg2
-            from psycopg2.extras import RealDictRow
+            from psycopg2.extras import RealDictCursor
             conn = psycopg2.connect(DATABASE_URL)
             conn.set_session(autocommit=False)
-            # Use RealDictRow for PostgreSQL to match SQLite Row behavior
+            # Store cursor factory for PostgreSQL to match SQLite Row behavior
+            conn.cursor_factory = RealDictCursor
             return conn
         except ImportError:
             print("Warning: DATABASE_URL set but psycopg2 not installed. Falling back to SQLite.")
@@ -62,7 +63,11 @@ def execute_query(conn, query, params=None):
 def api_wallet_balance():
     """Get wallet balance - available funds and locked funds"""
     conn = get_db()
-    c = conn.cursor()
+    if is_postgres(conn):
+        from psycopg2.extras import RealDictCursor
+        c = conn.cursor(cursor_factory=RealDictCursor)
+    else:
+        c = conn.cursor()
     
     # Calculate locked funds from pending bets
     c.execute("""
@@ -70,7 +75,8 @@ def api_wallet_balance():
         FROM bets
         WHERE result='pending'
     """)
-    locked_funds = float(c.fetchone()["locked_funds"] or 0)
+    row = c.fetchone()
+    locked_funds = float(dict(row)["locked_funds"] or 0)
     
     # Get available balance from CLOB
     available_balance = 0.0
@@ -103,7 +109,11 @@ def api_wallet_balance():
 @app.get("/api/stats")
 def api_stats():
     conn = get_db()
-    c = conn.cursor()
+    if is_postgres(conn):
+        from psycopg2.extras import RealDictCursor
+        c = conn.cursor(cursor_factory=RealDictCursor)
+    else:
+        c = conn.cursor()
     c.execute("""
         SELECT COUNT(*) as total_bets,
             SUM(CASE WHEN result='won' THEN 1 ELSE 0 END) as wins,
@@ -115,35 +125,41 @@ def api_stats():
             COALESCE(SUM(CASE WHEN result='pending' THEN amount ELSE 0 END), 0) as pending_locked
         FROM bets
     """)
-    stats = dict(c.fetchone())
+    row = c.fetchone()
+    stats = dict(row)
     wins = stats.get("wins") or 0
     losses = stats.get("losses") or 0
     resolved = wins + losses
     stats["win_rate"] = (wins / resolved * 100) if resolved > 0 else 0
 
     c.execute("SELECT * FROM windows ORDER BY id DESC LIMIT 1")
-    last_win = c.fetchone()
+    last_win_row = c.fetchone()
+    last_win = dict(last_win_row) if last_win_row else None
     stats["current_clip"] = last_win["clip_size"] if last_win else 10.0
     stats["current_phase"] = last_win["phase"] if last_win else "growth"
     stats["last_window_at"] = last_win["started_at"] if last_win else None
 
     c.execute("SELECT COUNT(*) as cnt FROM windows")
-    stats["total_windows"] = c.fetchone()["cnt"]
+    cnt_row = c.fetchone()
+    stats["total_windows"] = dict(cnt_row)["cnt"] if cnt_row else 0
 
     c.execute("SELECT COALESCE(SUM(pocketed), 0) as total_pocketed FROM windows")
-    stats["total_pocketed"] = c.fetchone()["total_pocketed"]
+    pocketed_row = c.fetchone()
+    stats["total_pocketed"] = dict(pocketed_row)["total_pocketed"] if pocketed_row else 0.0
 
     c.execute("SELECT result FROM bets WHERE result!='pending' ORDER BY id DESC")
     streak = 0
     for row in c.fetchall():
-        if row["result"] == "lost":
+        row_dict = dict(row)
+        if row_dict["result"] == "lost":
             streak += 1
         else:
             break
     stats["consecutive_losses"] = streak
 
     c.execute("SELECT paper FROM bets ORDER BY id DESC LIMIT 1")
-    last_bet = c.fetchone()
+    last_bet_row = c.fetchone()
+    last_bet = dict(last_bet_row) if last_bet_row else None
     stats["mode"] = "paper" if (not last_bet or last_bet["paper"]) else "live"
     
     # Calculate position value from pending bets
@@ -154,7 +170,8 @@ def api_stats():
         FROM bets 
         WHERE result='pending'
     """)
-    pending_bets = c.fetchall()
+    pending_bets_rows = c.fetchall()
+    pending_bets = [dict(r) for r in pending_bets_rows]
     
     position_value = 0.0
     try:
@@ -193,7 +210,8 @@ def api_stats():
         # Fallback: use size × entry price if CLOB unavailable
         c.execute("SELECT COALESCE(SUM(size * price), 0) as position_value FROM bets WHERE result='pending'")
         position_row = c.fetchone()
-        position_value = float(position_row["position_value"]) if position_row and position_row["position_value"] else 0.0
+        position_dict = dict(position_row) if position_row else {}
+        position_value = float(position_dict.get("position_value", 0) or 0)
     
     stats["position_value"] = position_value
     
@@ -228,11 +246,12 @@ def api_stats():
 @app.get("/api/windows")
 def api_windows(limit: int = 50):
     conn = get_db()
-    c = conn.cursor()
-    # Handle both SQLite (?) and PostgreSQL (%s) parameter styles
     if is_postgres(conn):
+        from psycopg2.extras import RealDictCursor
+        c = conn.cursor(cursor_factory=RealDictCursor)
         c.execute("SELECT * FROM windows ORDER BY id DESC LIMIT %s", (limit,))
     else:
+        c = conn.cursor()
         c.execute("SELECT * FROM windows ORDER BY id DESC LIMIT ?", (limit,))
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
@@ -242,13 +261,16 @@ def api_windows(limit: int = 50):
 @app.get("/api/bets")
 def api_bets(limit: int = 100):
     conn = get_db()
-    c = conn.cursor()
-    # Handle both SQLite (?) and PostgreSQL (%s) parameter styles
+    # Use RealDictCursor for PostgreSQL, regular cursor for SQLite
     if is_postgres(conn):
+        from psycopg2.extras import RealDictCursor
+        c = conn.cursor(cursor_factory=RealDictCursor)
         c.execute("SELECT * FROM bets ORDER BY id DESC LIMIT %s", (limit,))
+        rows = [dict(r) for r in c.fetchall()]
     else:
+        c = conn.cursor()
         c.execute("SELECT * FROM bets ORDER BY id DESC LIMIT ?", (limit,))
-    rows = [dict(r) for r in c.fetchall()]
+        rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows
 
@@ -256,8 +278,13 @@ def api_bets(limit: int = 100):
 @app.get("/api/pending")
 def api_pending():
     conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT * FROM bets WHERE result='pending' ORDER BY id DESC")
+    if is_postgres(conn):
+        from psycopg2.extras import RealDictCursor
+        c = conn.cursor(cursor_factory=RealDictCursor)
+        c.execute("SELECT * FROM bets WHERE result='pending' ORDER BY id DESC")
+    else:
+        c = conn.cursor()
+        c.execute("SELECT * FROM bets WHERE result='pending' ORDER BY id DESC")
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows
@@ -266,7 +293,11 @@ def api_pending():
 @app.get("/api/circuit-breaker")
 def api_circuit_breaker():
     conn = get_db()
-    c = conn.cursor()
+    if is_postgres(conn):
+        from psycopg2.extras import RealDictCursor
+        c = conn.cursor(cursor_factory=RealDictCursor)
+    else:
+        c = conn.cursor()
     c.execute("SELECT * FROM circuit_breaker_log ORDER BY id DESC LIMIT 20")
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
@@ -276,17 +307,23 @@ def api_circuit_breaker():
 @app.get("/api/equity-curve")
 def api_equity_curve():
     conn = get_db()
-    c = conn.cursor()
+    if is_postgres(conn):
+        from psycopg2.extras import RealDictCursor
+        c = conn.cursor(cursor_factory=RealDictCursor)
+    else:
+        c = conn.cursor()
     c.execute("SELECT id, started_at, profit, pocketed, clip_size, phase FROM windows ORDER BY id ASC")
     rows = c.fetchall()
     cumulative = 0
     curve = []
     for r in rows:
-        cumulative += r["profit"]
+        # Convert to dict if needed (PostgreSQL RealDictCursor already dict-like)
+        row_dict = dict(r) if not isinstance(r, dict) else r
+        cumulative += row_dict["profit"]
         curve.append({
-            "window": r["id"], "date": r["started_at"],
-            "profit": r["profit"], "cumulative": round(cumulative, 2),
-            "clip": r["clip_size"], "phase": r["phase"],
+            "window": row_dict["id"], "date": row_dict["started_at"],
+            "profit": row_dict["profit"], "cumulative": round(cumulative, 2),
+            "clip": row_dict["clip_size"], "phase": row_dict["phase"],
         })
     conn.close()
     return curve
@@ -296,7 +333,11 @@ def api_equity_curve():
 def api_pnl_flow():
     """Get complete P&L cash flow with running balance"""
     conn = get_db()
-    c = conn.cursor()
+    if is_postgres(conn):
+        from psycopg2.extras import RealDictCursor
+        c = conn.cursor(cursor_factory=RealDictCursor)
+    else:
+        c = conn.cursor()
     
     # Get all bets ordered by time
     c.execute("""
@@ -305,7 +346,8 @@ def api_pnl_flow():
         FROM bets 
         ORDER BY placed_at ASC
     """)
-    bets = c.fetchall()
+    bets_rows = c.fetchall()
+    bets = [dict(r) for r in bets_rows]
     
     # Calculate cash flow
     starting_balance = 90.0  # TODO: Make this configurable
@@ -372,12 +414,14 @@ def api_pnl_flow():
     # Also calculate settled P&L (for reference)
     c.execute("SELECT COALESCE(SUM(profit), 0) as settled_pnl FROM bets WHERE result != 'pending'")
     settled_pnl_row = c.fetchone()
-    settled_pnl = float(settled_pnl_row["settled_pnl"]) if settled_pnl_row and settled_pnl_row["settled_pnl"] is not None else 0.0
+    settled_pnl_dict = dict(settled_pnl_row) if settled_pnl_row else {}
+    settled_pnl = float(settled_pnl_dict.get("settled_pnl", 0) or 0)
     
     # Pending bets amount (unrealized)
     c.execute("SELECT COALESCE(SUM(amount), 0) as pending_amount FROM bets WHERE result = 'pending'")
     pending_row = c.fetchone()
-    pending_amount = float(pending_row["pending_amount"]) if pending_row and pending_row["pending_amount"] is not None else 0.0
+    pending_dict = dict(pending_row) if pending_row else {}
+    pending_amount = float(pending_dict.get("pending_amount", 0) or 0)
     
     conn.close()
     return {
