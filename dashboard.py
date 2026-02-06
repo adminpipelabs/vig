@@ -453,14 +453,34 @@ def api_bot_status():
     last_window_row = c.fetchone()
     last_window = dict(last_window_row)["started_at"] if last_window_row else None
     
-    # If status file is old (>5 minutes), consider bot stopped
-    if status.get("updated_at"):
+    # If status file doesn't exist or is old, infer status from database activity
+    if status.get("status") == "unknown" or not status.get("updated_at"):
+        # Check if there's recent database activity (within last hour)
+        if last_window:
+            try:
+                last_window_dt = datetime.fromisoformat(last_window.replace("Z", "+00:00"))
+                age_seconds = (datetime.now(timezone.utc) - last_window_dt).total_seconds()
+                if age_seconds < 3600:  # Within last hour
+                    status["status"] = "running"
+                    status["activity"] = "Bot active (inferred from recent windows)"
+                else:
+                    status["status"] = "stopped"
+                    status["activity"] = f"Last activity {int(age_seconds/3600)}h ago"
+            except:
+                pass
+        else:
+            # No windows at all - bot never ran or just started
+            status["status"] = "stopped"
+            status["activity"] = "No activity recorded yet"
+    
+    # If status file exists but is old (>5 minutes), update status
+    elif status.get("updated_at"):
         try:
             last_update = datetime.fromisoformat(status["updated_at"].replace("Z", "+00:00"))
             age_seconds = (datetime.now(timezone.utc) - last_update).total_seconds()
             if age_seconds > 300:  # 5 minutes
                 status["status"] = "stopped"
-                status["activity"] = "No activity detected"
+                status["activity"] = "No recent activity detected"
         except:
             pass
     
@@ -868,7 +888,6 @@ canvas { width:100%!important; height:100%!important; }
 <div class="header">
   <div class="header-left">
     <div class="logo"><a href="/" style="color:inherit;text-decoration:none;">V<span>ig</span></a></div>
-    <a href="/pnl" class="nav-link">P&L Flow</a>
     <div class="status-badge offline" id="statusBadge"><div class="status-dot"></div><span id="statusText">Loading...</span></div>
   </div>
   <div class="header-right">
@@ -1256,6 +1275,8 @@ function updateBotStatus(status){
   }
   if(status.last_window){
     html+='<div class="bot-last-window"><strong>Last Window:</strong> '+timeAgo(status.last_window)+'</div>';
+  } else {
+    html+='<div class="bot-last-window"><strong>Last Window:</strong> <span style="color:var(--text-dim)">No windows recorded yet</span></div>';
   }
   html+='<div class="bot-note"><small>Bot scans Polymarket every hour for expiring markets. Future: Support for additional prediction exchanges.</small></div>';
   html+='</div>';
