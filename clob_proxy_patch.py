@@ -129,30 +129,51 @@ def _patch_httpx_globally():
     _patched_count = [0]  # Use list to allow modification in nested function
     
     def _patched_client_init(self, *args, **kwargs):
-        # Inject proxy if not already provided
-        if 'proxy' not in kwargs:
-            kwargs['proxy'] = PROXY_URL
-            _patched_count[0] += 1
-            proxy_display = PROXY_URL.split("@")[-1] if "@" in PROXY_URL else PROXY_URL[:30] + "..."
-            logger.info(f"🔧 Injecting proxy into httpx.Client #{_patched_count[0]}: {proxy_display}")
+        # ALWAYS inject proxy (even if one is provided, override with ours)
+        kwargs['proxy'] = PROXY_URL
+        _patched_count[0] += 1
+        proxy_display = PROXY_URL.split("@")[-1] if "@" in PROXY_URL else PROXY_URL[:30] + "..."
+        logger.info(f"🔧 Injecting proxy into httpx.Client #{_patched_count[0]}: {proxy_display}")
         
         # Call original init with proxy included
-        _original_client_init(self, *args, **kwargs)
+        try:
+            _original_client_init(self, *args, **kwargs)
+        except Exception as e:
+            logger.error(f"❌ httpx.Client.__init__ failed: {e}")
+            raise
         
         # Verify proxy was set (check multiple ways httpx might store it)
-        proxy_set = (
-            getattr(self, '_proxy', None) or 
-            getattr(self, '_proxies', {}) or
-            getattr(self, 'transport', None) and hasattr(self.transport, '_proxy')
-        )
+        # httpx stores proxy in transport._pool._proxy or similar
+        proxy_set = False
+        proxy_location = "unknown"
+        
+        # Check direct attributes
+        if hasattr(self, '_proxy') and self._proxy:
+            proxy_set = True
+            proxy_location = "_proxy"
+        elif hasattr(self, '_proxies') and self._proxies:
+            proxy_set = True
+            proxy_location = "_proxies"
+        elif hasattr(self, 'transport'):
+            # Check transport level
+            transport = self.transport
+            if hasattr(transport, '_pool'):
+                pool = transport._pool
+                if hasattr(pool, '_proxy') and pool._proxy:
+                    proxy_set = True
+                    proxy_location = "transport._pool._proxy"
+        
         if proxy_set:
-            logger.info(f"✅ httpx.Client #{_patched_count[0]} verified with proxy")
+            logger.info(f"✅ httpx.Client #{_patched_count[0]} verified with proxy (location: {proxy_location})")
         else:
-            # Try to inspect transport
+            # Log transport details for debugging
             transport_info = "None"
             if hasattr(self, 'transport'):
                 transport_info = f"{type(self.transport).__name__}"
-            logger.warning(f"⚠️  httpx.Client #{_patched_count[0]} proxy verification unclear (transport: {transport_info})")
+                if hasattr(self.transport, '_pool'):
+                    transport_info += f" (pool: {type(self.transport._pool).__name__})"
+            logger.warning(f"⚠️  httpx.Client #{_patched_count[0]} proxy NOT verified (transport: {transport_info})")
+            logger.warning(f"   Client attributes: {[a for a in dir(self) if 'proxy' in a.lower()][:5]}")
     
     httpx.Client.__init__ = _patched_client_init
     logger.info("✅ httpx.Client.__init__ globally patched - all new clients will use proxy")

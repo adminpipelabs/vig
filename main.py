@@ -1,6 +1,13 @@
 """
 Vig v1 — Main loop. Scan → Bet → Settle → Snowball → Repeat.
+
+CRITICAL: proxy_init MUST be imported FIRST to patch httpx before any other modules use it.
 """
+# ============================================
+# STEP 1: Patch httpx BEFORE anything else
+# ============================================
+import proxy_init  # MUST be first import - patches httpx.Client before py_clob_client uses it
+
 import os
 import sys
 import time
@@ -11,7 +18,7 @@ from datetime import datetime, timezone
 
 from datetime import datetime, timezone
 
-# Set up logging FIRST so patch can log
+# Set up logging
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=getattr(logging, log_level, logging.INFO),
@@ -20,18 +27,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("vig")
 
-# CRITICAL: Patch py_clob_client BEFORE importing anything that uses it
-# This must happen before ClobClient is imported anywhere
-from clob_proxy_patch import patch_clob_globally, add_debug_wrapper
-
-# Patch py_clob_client to use proxy (must be before any ClobClient imports)
-proxy_url = os.getenv("RESIDENTIAL_PROXY_URL", "").strip()
-if proxy_url:
-    logger.info("Patching py_clob_client with residential proxy...")
-    patch_clob_globally()
-    add_debug_wrapper()  # Temporary: helps diagnose connection issues
-else:
-    logger.warning("⚠️  RESIDENTIAL_PROXY_URL not set - CLOB calls may be blocked")
+# Debug wrapper for detailed error logging (optional, helps diagnose)
+from clob_proxy_patch import add_debug_wrapper
+add_debug_wrapper()
 
 from config import Config
 from db import Database, WindowRecord
