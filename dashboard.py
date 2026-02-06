@@ -31,14 +31,20 @@ def get_db():
         try:
             import psycopg2
             from psycopg2.extras import RealDictCursor
-            conn = psycopg2.connect(DATABASE_URL)
+            conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
             conn.set_session(autocommit=False)
             # Store cursor factory for PostgreSQL to match SQLite Row behavior
             conn.cursor_factory = RealDictCursor
             return conn
         except ImportError:
-            print("Warning: DATABASE_URL set but psycopg2 not installed. Falling back to SQLite.")
-            print("Install with: pip install psycopg2-binary")
+            logger.warning("DATABASE_URL set but psycopg2 not installed. Falling back to SQLite.")
+            logger.warning("Install with: pip install psycopg2-binary")
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            return conn
+        except Exception as e:
+            logger.error(f"Failed to connect to PostgreSQL: {e}")
+            logger.warning("Falling back to SQLite")
             conn = sqlite3.connect(DB_PATH)
             conn.row_factory = sqlite3.Row
             return conn
@@ -223,7 +229,7 @@ def api_stats():
     
     stats["position_value"] = position_value
     
-    # Get current CLOB cash balance
+    # Get current CLOB cash balance (handle Cloudflare blocking gracefully)
     try:
         from py_clob_client.client import ClobClient
         from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
@@ -237,10 +243,13 @@ def api_stats():
         balance_info = client.get_balance_allowance(params)
         stats["current_cash"] = float(balance_info.get('balance', 0)) / 1e6
     except Exception as e:
-        stats["current_cash"] = 0.0
+        # Cloudflare blocking or other CLOB API errors - don't crash
+        logger.warning(f"Could not fetch CLOB balance (Cloudflare blocking?): {e}")
+        stats["current_cash"] = None  # Use None instead of 0 to indicate unavailable
     
-    # Calculate total portfolio value
-    stats["total_portfolio"] = stats["current_cash"] + stats["position_value"]
+    # Calculate total portfolio value (handle None cash gracefully)
+    cash = stats.get("current_cash") or 0.0
+    stats["total_portfolio"] = cash + stats["position_value"]
     
     # Starting balance
     starting_balance = 90.0
