@@ -107,16 +107,18 @@ def api_wallet_balance():
         balance_info = client.get_balance_allowance(params)
         available_balance = float(balance_info.get('balance', 0)) / 1e6
     except Exception as e:
-        pass
+        logger.warning(f"Could not fetch CLOB balance (Cloudflare blocking?): {e}")
+        available_balance = None  # Indicate unavailable
     
-    total_balance = available_balance + locked_funds
+    total_balance = (available_balance or 0) + locked_funds
     
     conn.close()
     return {
         "available_balance": available_balance,
         "locked_funds": locked_funds,
         "total_balance": total_balance,
-        "currency": "USDC"
+        "currency": "USDC",
+        "clob_available": available_balance is not None
     }
 
 
