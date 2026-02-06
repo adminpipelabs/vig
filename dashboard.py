@@ -515,9 +515,9 @@ def api_bot_status():
 
 @app.post("/api/bot-control")
 def api_bot_control(action: str):
-    """Control bot (start/stop/restart)"""
-    import subprocess
+    """Control bot (start/stop/restart) using Railway API"""
     import os
+    import httpx
     
     result = {
         "status": "success",
@@ -527,32 +527,79 @@ def api_bot_control(action: str):
     
     try:
         if action == "restart":
-            # Try to restart via Railway CLI
-            railway_path = "/opt/homebrew/bin/railway"
-            if os.path.exists(railway_path):
+            # Try Railway GraphQL API first
+            railway_token = os.getenv("RAILWAY_TOKEN")
+            service_id = os.getenv("RAILWAY_SERVICE_ID")
+            
+            if railway_token and service_id:
                 try:
-                    # Run restart in background
-                    subprocess.Popen(
-                        [railway_path, "restart", "--yes"],
-                        cwd=os.getcwd(),
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE
-                    )
-                    result["message"] = "Bot restart initiated. This may take 30-60 seconds."
+                    # Get latest deployment ID for the service
+                    graphql_url = "https://backboard.railway.com/graphql/v2"
+                    headers = {
+                        "Authorization": f"Bearer {railway_token}",
+                        "Content-Type": "application/json"
+                    }
+                    
+                    # Query to get latest deployment
+                    query = """
+                    query {
+                      deployments(input: {serviceId: "%s", limit: 1}) {
+                        edges {
+                          node {
+                            id
+                            status
+                          }
+                        }
+                      }
+                    }
+                    """ % service_id
+                    
+                    # Get deployment ID
+                    resp = httpx.post(graphql_url, json={"query": query}, headers=headers, timeout=10)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        deployments = data.get("data", {}).get("deployments", {}).get("edges", [])
+                        if deployments:
+                            deployment_id = deployments[0]["node"]["id"]
+                            
+                            # Restart deployment
+                            restart_mutation = """
+                            mutation {
+                              deploymentRestart(id: "%s") {
+                                id
+                                status
+                              }
+                            }
+                            """ % deployment_id
+                            
+                            restart_resp = httpx.post(graphql_url, json={"query": restart_mutation}, headers=headers, timeout=10)
+                            if restart_resp.status_code == 200:
+                                result["message"] = "✅ Bot restart initiated via Railway API. This may take 30-60 seconds."
+                            else:
+                                result["status"] = "error"
+                                result["message"] = f"Railway API error: {restart_resp.status_code}. Please restart manually via Railway dashboard."
+                        else:
+                            result["status"] = "error"
+                            result["message"] = "Could not find deployment. Please restart manually via Railway dashboard."
+                    else:
+                        result["status"] = "error"
+                        result["message"] = f"Railway API error: {resp.status_code}. Please restart manually via Railway dashboard."
+                        
                 except Exception as e:
                     result["status"] = "error"
-                    result["message"] = f"Could not restart via Railway CLI: {str(e)}. Please restart manually via Railway dashboard."
+                    result["message"] = f"Railway API error: {str(e)}. Please restart manually via Railway dashboard."
             else:
+                # Fallback: Instructions
                 result["status"] = "info"
-                result["message"] = "Railway CLI not found. Please restart manually via Railway dashboard at https://railway.app"
+                result["message"] = "⚠️ Railway API not configured. To enable restart:\n1. Get Railway API token from https://railway.app/account\n2. Set RAILWAY_TOKEN env var\n3. Set RAILWAY_SERVICE_ID env var\n\nFor now, restart manually via Railway dashboard → Service → Restart"
         
         elif action == "stop":
             result["status"] = "info"
-            result["message"] = "To stop the bot, go to Railway dashboard → Service → Settings → Stop. Or set PAPER_MODE=true to pause trading."
+            result["message"] = "To stop the bot:\n1. Go to Railway dashboard → Service → Settings → Stop\n2. Or set PAPER_MODE=true environment variable to pause trading"
         
         elif action == "start":
             result["status"] = "info"
-            result["message"] = "To start the bot, go to Railway dashboard → Service → Settings → Start. The bot starts automatically on deployment."
+            result["message"] = "To start the bot:\n1. Go to Railway dashboard → Service → Settings → Start\n2. The bot starts automatically on deployment"
         
         else:
             result["status"] = "error"
@@ -1392,14 +1439,18 @@ async function controlBot(action){
   messageEl.style.display='none';
   
   try{
+    const formData=new FormData();
+    formData.append('action',action);
+    
     const response=await fetch('/api/bot-control',{
       method:'POST',
-      headers:{'Content-Type':'application/x-www-form-urlencoded'},
-      body:`action=${action}`
+      body:formData
     });
     const result=await response.json();
     
-    messageEl.textContent=result.message||'Action completed';
+    // Format message with line breaks
+    const message=result.message||'Action completed';
+    messageEl.innerHTML=message.replace(/\n/g,'<br>');
     messageEl.style.display='block';
     messageEl.style.background=result.status==='success'?'var(--green-dim)':result.status==='error'?'var(--red-dim)':'var(--amber-dim)';
     messageEl.style.color=result.status==='success'?'var(--green)':result.status==='error'?'var(--red)':'var(--amber)';
@@ -1408,10 +1459,10 @@ async function controlBot(action){
       // Refresh status after a delay
       setTimeout(()=>{
         location.reload();
-      },3000);
+      },5000);
     }
   }catch(e){
-    messageEl.textContent='Error: '+e.message;
+    messageEl.innerHTML='Error: '+e.message;
     messageEl.style.display='block';
     messageEl.style.background='var(--red-dim)';
     messageEl.style.color='var(--red)';
