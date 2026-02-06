@@ -434,6 +434,53 @@ def api_pnl_flow():
     }
 
 
+@app.get("/api/bot-status")
+def api_bot_status():
+    """Get bot status and activity"""
+    from bot_status import get_bot_status
+    status = get_bot_status()
+    
+    # Also check database for recent activity as fallback
+    conn = get_db()
+    if is_postgres(conn):
+        from psycopg2.extras import RealDictCursor
+        c = conn.cursor(cursor_factory=RealDictCursor)
+    else:
+        c = conn.cursor()
+    
+    # Get last window time
+    c.execute("SELECT started_at FROM windows ORDER BY id DESC LIMIT 1")
+    last_window_row = c.fetchone()
+    last_window = dict(last_window_row)["started_at"] if last_window_row else None
+    
+    # If status file is old (>5 minutes), consider bot stopped
+    if status.get("updated_at"):
+        try:
+            last_update = datetime.fromisoformat(status["updated_at"].replace("Z", "+00:00"))
+            age_seconds = (datetime.now(timezone.utc) - last_update).total_seconds()
+            if age_seconds > 300:  # 5 minutes
+                status["status"] = "stopped"
+                status["activity"] = "No activity detected"
+        except:
+            pass
+    
+    status["last_window"] = last_window
+    conn.close()
+    return status
+
+
+@app.post("/api/bot-control")
+def api_bot_control(action: str):
+    """Control bot (start/stop) - Note: On Railway, bot runs via Procfile"""
+    # On Railway, bot is managed by Procfile/railway.toml
+    # This endpoint is for future use or local development
+    return {
+        "status": "info",
+        "message": f"Bot control via Railway deployment. Use Railway dashboard to restart service.",
+        "action": action
+    }
+
+
 @app.get("/api/scan")
 def api_scan():
     """Live scan — hit Polymarket Gamma API right now and return qualifying markets."""
@@ -752,8 +799,14 @@ body { background:var(--bg); color:var(--text); font-family:var(--font-mono); fo
 .status-badge.paper { background:var(--amber-dim); color:var(--amber); }
 .status-badge.live { background:var(--green-dim); color:var(--green); }
 .status-badge.offline { background:var(--red-dim); color:var(--red); }
+.status-badge.error { background:var(--red-dim); color:var(--red); }
 .status-dot { width:6px; height:6px; border-radius:50%; background:currentColor; animation:pulse 2s ease-in-out infinite; }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+.bot-status-info { padding:12px 0; }
+.bot-activity, .bot-last-scan, .bot-last-window { margin-bottom:8px; font-size:12px; }
+.bot-activity strong, .bot-last-scan strong, .bot-last-window strong { color:var(--text-dim); margin-right:8px; }
+.bot-note { margin-top:12px; padding-top:12px; border-top:1px solid var(--border); font-size:11px; color:var(--text-dim); line-height:1.5; }
+.card-actions { display:flex; align-items:center; gap:8px; }
 .header-right { display:flex; align-items:center; gap:16px; }
 .refresh-label { color:var(--text-dim); font-size:11px; }
 .countdown { font-size:12px; color:var(--cyan); font-weight:500; }
@@ -888,7 +941,20 @@ canvas { width:100%!important; height:100%!important; }
       <button class="btn btn-cyan" id="scanBtn" onclick="runScan()">Scan Now</button>
     </div>
     <div id="scanResults">
-      <div class="empty"><div class="empty-icon">&#9673;</div><div>Hit "Scan Now" to check Polymarket for expiring markets</div></div>
+      <div class="empty"><div class="empty-icon">&#9673;</div><div>Hit "Scan Now" to scan Polymarket for expiring markets (future: additional prediction exchanges)</div></div>
+    </div>
+  </div>
+
+  <!-- Bot Status Card -->
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title">Bot Status</div>
+      <div class="card-actions">
+        <span class="status-badge" id="botStatusBadge">--</span>
+      </div>
+    </div>
+    <div id="botStatusContent">
+      <div class="empty">Loading bot status...</div>
     </div>
   </div>
 
@@ -1061,17 +1127,20 @@ async function runScan(){
       html+='</tr>';
     }
     html+='</table>';
-    html+='<div class="scan-note">Scanned at '+new Date(data.scanned_at).toLocaleTimeString()+' | Window ends '+new Date(data.window_end).toLocaleTimeString()+'</div>';
+    html+='<div class="scan-note">Scanned Polymarket at '+new Date(data.scanned_at).toLocaleTimeString()+' | Window ends '+new Date(data.window_end).toLocaleTimeString()+'</div>';
   }
   el.innerHTML=html;
 }
 
 async function refresh(){
-  const[stats,windows,bets,curve,pending]=await Promise.all([
+  const[stats,windows,bets,curve,pending,botStatus]=await Promise.all([
     fetchJSON('/api/stats'),fetchJSON('/api/windows?limit=20'),
     fetchJSON('/api/bets?limit=30'),fetchJSON('/api/equity-curve'),
-    fetchJSON('/api/pending'),
+    fetchJSON('/api/pending'),fetchJSON('/api/bot-status'),
   ]);
+  
+  // Update bot status
+  updateBotStatus(botStatus);
 
   // Status
   const b=document.getElementById('statusBadge'),st=document.getElementById('statusText');
@@ -1162,6 +1231,35 @@ async function refresh(){
     equityChart=new Chart(ctx,{type:'line',data:{labels:curve.map(c=>'W'+c.window),datasets:[{data:d,borderColor:d[d.length-1]>=0?'#00e676':'#ff5252',backgroundColor:d[d.length-1]>=0?'rgba(0,230,118,0.08)':'rgba(255,82,82,0.08)',fill:true,tension:0.3,pointRadius:2,borderWidth:2}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#6b7084',font:{size:10}},grid:{color:'rgba(255,255,255,0.04)'}},y:{ticks:{color:'#6b7084',font:{size:10},callback:v=>'$'+v},grid:{color:'rgba(255,255,255,0.04)'}}},interaction:{intersect:false,mode:'index'}}})
   }
   document.getElementById('lastUpdate').textContent='Updated '+new Date().toLocaleTimeString();
+}
+
+function updateBotStatus(status){
+  if(!status)return;
+  const badge=document.getElementById('botStatusBadge');
+  const content=document.getElementById('botStatusContent');
+  
+  const statusMap={
+    'running':{class:'status-badge live',text:'Running'},
+    'stopped':{class:'status-badge offline',text:'Stopped'},
+    'error':{class:'status-badge error',text:'Error'},
+    'unknown':{class:'status-badge offline',text:'Unknown'}
+  };
+  
+  const s=statusMap[status.status]||statusMap['unknown'];
+  badge.className=s.class;
+  badge.textContent=s.text;
+  
+  let html='<div class="bot-status-info">';
+  html+='<div class="bot-activity"><strong>Activity:</strong> '+(status.activity||'Unknown')+'</div>';
+  if(status.last_scan){
+    html+='<div class="bot-last-scan"><strong>Last Scan:</strong> '+timeAgo(status.last_scan)+'</div>';
+  }
+  if(status.last_window){
+    html+='<div class="bot-last-window"><strong>Last Window:</strong> '+timeAgo(status.last_window)+'</div>';
+  }
+  html+='<div class="bot-note"><small>Bot scans Polymarket every hour for expiring markets. Future: Support for additional prediction exchanges.</small></div>';
+  html+='</div>';
+  content.innerHTML=html;
 }
 
 refresh();setInterval(refresh,15000);
