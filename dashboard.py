@@ -407,9 +407,39 @@ def api_pnl_flow():
                 "order_id": bet["order_id"]
             })
     
-    # Calculate EXACT net P&L from balance change (includes pending bets impact)
-    # This is the REAL P&L: what you actually have vs what you started with
-    actual_net_pnl = running_balance - starting_balance
+    # Get actual current balance - match Overview tab calculation
+    # Overview shows: total_portfolio = current_cash + position_value
+    # Where position_value = locked funds from pending bets
+    
+    # Get current cash from CLOB (same as Overview)
+    current_cash = 0.0
+    try:
+        from py_clob_client.client import ClobClient
+        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+        import os
+        from dotenv import load_dotenv
+        load_dotenv()
+        
+        client = ClobClient('https://clob.polymarket.com', key=os.getenv('POLYGON_PRIVATE_KEY'), chain_id=137)
+        client.set_api_creds(client.create_or_derive_api_creds())
+        params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=0)
+        balance_info = client.get_balance_allowance(params)
+        current_cash = float(balance_info.get('balance', 0)) / 1e6
+    except Exception as e:
+        # Fallback: calculate from settled transactions
+        current_cash = running_balance
+    
+    # Get locked funds (pending bets) - same as Overview's position_value
+    c.execute("SELECT COALESCE(SUM(amount), 0) as pending_amount FROM bets WHERE result = 'pending'")
+    pending_row = c.fetchone()
+    pending_dict = dict(pending_row) if pending_row else {}
+    pending_amount = float(pending_dict.get("pending_amount", 0) or 0)
+    
+    # Total portfolio = current cash + locked funds (matches Overview)
+    actual_current_balance = current_cash + pending_amount
+    
+    # Calculate net P&L (matches Overview)
+    actual_net_pnl = actual_current_balance - starting_balance
     
     # Also calculate settled P&L (for reference)
     c.execute("SELECT COALESCE(SUM(profit), 0) as settled_pnl FROM bets WHERE result != 'pending'")
@@ -417,17 +447,11 @@ def api_pnl_flow():
     settled_pnl_dict = dict(settled_pnl_row) if settled_pnl_row else {}
     settled_pnl = float(settled_pnl_dict.get("settled_pnl", 0) or 0)
     
-    # Pending bets amount (unrealized)
-    c.execute("SELECT COALESCE(SUM(amount), 0) as pending_amount FROM bets WHERE result = 'pending'")
-    pending_row = c.fetchone()
-    pending_dict = dict(pending_row) if pending_row else {}
-    pending_amount = float(pending_dict.get("pending_amount", 0) or 0)
-    
     conn.close()
     return {
         "starting_balance": starting_balance,
-        "current_balance": running_balance,
-        "net_pnl": actual_net_pnl,  # REAL P&L: balance change (includes pending impact)
+        "current_balance": actual_current_balance,  # Matches Overview's total_portfolio
+        "net_pnl": actual_net_pnl,  # Matches Overview's net_pnl
         "settled_pnl": settled_pnl,  # Settled bets P&L only
         "pending_amount": pending_amount,  # Amount locked in pending bets
         "flow": flow
