@@ -6,7 +6,6 @@ MUST be imported FIRST in main.py. Does two things:
 """
 import os
 import httpx
-from urllib.parse import quote
 
 # Unset env proxy vars so nothing overrides our proxy (httpx uses them when trust_env=True)
 for key in list(os.environ.keys()):
@@ -14,12 +13,9 @@ for key in list(os.environ.keys()):
         del os.environ[key]
 
 # Hardcoded proxy — bot must trade; env var was not reliably read on Railway.
-# Format: http://user:pass@host:port — password URL-encoded in case of special chars.
+# Format: http://user:pass@host:port
 # If you get ProxyError 403: check Bright Data dashboard (credentials, zone active, balance).
-_proxy_user = "brd-customer-hl_b4689439-zone-residential_proxy1"
-_proxy_pass = "5teowbs6s9c9"
-_proxy_host = "brd.superproxy.io:33335"
-PROXY_URL = f"http://{_proxy_user}:{quote(_proxy_pass, safe='')}@{_proxy_host}"
+PROXY_URL = "http://brd-customer-hl_b4689439-zone-residential_proxy1:5teowbs6s9c9@brd.superproxy.io:33335"
 
 # Allow override from env if set (so we can switch back later without code change)
 _env_proxy = os.getenv("RESIDENTIAL_PROXY_URL", "").strip()
