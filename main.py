@@ -69,34 +69,59 @@ def main():
     risk_mgr = RiskManager(config, db)
     notifier = Notifier(config)
 
-    # CLOB client only for live mode
+    # CLOB client only for live mode - try multiple strategies
     clob_client = None
     if not config.paper_mode:
-        try:
-            # Use proxy wrapper if RESIDENTIAL_PROXY_URL is set (for Railway deployment)
-            residential_proxy = os.getenv("RESIDENTIAL_PROXY_URL")
-            if residential_proxy:
+        residential_proxy = os.getenv("RESIDENTIAL_PROXY_URL", "").strip()
+        
+        # Strategy 1: Try proxy if configured
+        if residential_proxy:
+            try:
+                logger.info("Attempting CLOB client initialization with residential proxy...")
                 from clob_proxy import get_clob_client_with_proxy
                 host = config.clob_url
                 key = config.private_key
                 chain_id = config.chain_id
                 clob_client = get_clob_client_with_proxy(host, key=key, chain_id=chain_id)
-                logger.info("CLOB client initialized with residential proxy")
-            else:
+                creds = clob_client.create_or_derive_api_creds()
+                clob_client.set_api_creds(creds)
+                logger.info("✅ CLOB client initialized with residential proxy")
+            except Exception as e:
+                logger.warning(f"⚠️  Proxy initialization failed: {e}")
+                logger.info("Falling back to direct connection...")
+                clob_client = None
+        
+        # Strategy 2: Try direct connection (if proxy failed or not configured)
+        if clob_client is None:
+            try:
+                logger.info("Attempting CLOB client initialization with direct connection...")
                 from py_clob_client.client import ClobClient
-                # EOA initialization — no funder, no signature_type for direct EOA wallets
                 host = config.clob_url
                 key = config.private_key
                 chain_id = config.chain_id
                 clob_client = ClobClient(host, key=key, chain_id=chain_id)
-                logger.info("CLOB client initialized (direct connection)")
-            
-            creds = clob_client.create_or_derive_api_creds()
-            clob_client.set_api_creds(creds)
-        except Exception as e:
-            logger.error(f"Failed to init CLOB client: {e}")
-            logger.error("Cannot run live mode without CLOB client")
-            sys.exit(1)
+                creds = clob_client.create_or_derive_api_creds()
+                clob_client.set_api_creds(creds)
+                logger.info("✅ CLOB client initialized (direct connection)")
+            except Exception as e:
+                logger.warning(f"⚠️  Direct connection failed: {e}")
+                logger.warning("⚠️  Running in SCAN-ONLY mode - will scan markets but cannot place bets")
+                logger.warning("⚠️  Fix RESIDENTIAL_PROXY_URL or check CLOB API connectivity")
+                clob_client = None
+        
+        # Final check: Warn if still no client
+        if clob_client is None:
+            logger.error("=" * 60)
+            logger.error("⚠️  CLOB CLIENT NOT AVAILABLE")
+            logger.error("Bot will run in SCAN-ONLY mode:")
+            logger.error("  - ✅ Will scan markets and log candidates")
+            logger.error("  - ❌ Will NOT place bets")
+            logger.error("  - ✅ Dashboard will show scanning activity")
+            logger.error("=" * 60)
+            logger.error("To enable betting:")
+            logger.error("  1. Set valid RESIDENTIAL_PROXY_URL in Railway")
+            logger.error("  2. Or ensure direct CLOB API access works")
+            logger.error("=" * 60)
 
     bet_mgr = BetManager(config, db, snowball, clob_client)
 
