@@ -12,6 +12,19 @@ import httpx
 
 PROXY_URL = os.getenv("RESIDENTIAL_PROXY_URL", "").strip()
 
+# Debug: Log proxy URL format (redacted) for troubleshooting
+if PROXY_URL:
+    # Redact password for logging
+    if "@" in PROXY_URL:
+        parts = PROXY_URL.split("@")
+        if ":" in parts[0]:
+            user_pass = parts[0].split(":")
+            if len(user_pass) == 2:
+                redacted = f"{user_pass[0]}:****@{parts[1]}"
+                print(f"🔍 PROXY URL FORMAT: {redacted}")
+    else:
+        print(f"🔍 PROXY URL FORMAT: {PROXY_URL[:50]}...")
+
 
 def is_valid_proxy():
     """Check if proxy URL is valid (not a placeholder)"""
@@ -25,6 +38,15 @@ def is_valid_proxy():
     proxy_lower = PROXY_URL.lower()
     if any(pattern in proxy_lower for pattern in placeholder_patterns):
         return False
+    
+    # Warn if using wrong port for Bright Data residential proxy
+    if "brd.superproxy.io" in PROXY_URL:
+        if ":22225" in PROXY_URL:
+            print("⚠️  WARNING: Bright Data residential proxy should use port 33335, not 22225")
+            print("   Update RESIDENTIAL_PROXY_URL to use port 33335")
+        elif ":33335" not in PROXY_URL:
+            print(f"⚠️  WARNING: Unexpected port in Bright Data proxy URL: {PROXY_URL}")
+    
     return True
 
 
@@ -39,6 +61,9 @@ if is_valid_proxy():
         def __init__(self, *args, **kwargs):
             # Always inject proxy if not already set
             # httpx prefers 'proxy' parameter (single string) over 'proxies' dict
+            # IMPORTANT: httpx expects proxy URL in format: http://user:pass@host:port
+            # Bright Data format: http://brd-customer-XXXXX-zone-ZONE:PASSWORD@brd.superproxy.io:33335
+            
             if 'proxy' not in kwargs and 'proxies' not in kwargs:
                 kwargs['proxy'] = PROXY_URL
             elif 'proxies' in kwargs and not kwargs['proxies']:
@@ -48,6 +73,13 @@ if is_valid_proxy():
             elif 'proxy' not in kwargs:
                 # If proxies dict exists but proxy doesn't, add it
                 kwargs['proxy'] = PROXY_URL
+            
+            # Verify proxy URL format is correct
+            proxy_to_use = kwargs.get('proxy', PROXY_URL)
+            if proxy_to_use and not proxy_to_use.startswith('http://') and not proxy_to_use.startswith('https://'):
+                print(f"⚠️  WARNING: Proxy URL doesn't start with http:// or https://: {proxy_to_use[:50]}")
+            if proxy_to_use and '@' not in proxy_to_use:
+                print(f"⚠️  WARNING: Proxy URL missing @ separator (no auth?): {proxy_to_use[:50]}")
             
             # Add browser-like headers to help bypass Cloudflare
             if 'headers' not in kwargs:
