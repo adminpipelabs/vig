@@ -11,14 +11,27 @@ from datetime import datetime, timezone
 
 from datetime import datetime, timezone
 
+# Set up logging FIRST so patch can log
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, log_level, logging.INFO),
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("vig")
+
 # CRITICAL: Patch py_clob_client BEFORE importing anything that uses it
 # This must happen before ClobClient is imported anywhere
 from clob_proxy_patch import patch_clob_globally, add_debug_wrapper
 
 # Patch py_clob_client to use proxy (must be before any ClobClient imports)
-if os.getenv("RESIDENTIAL_PROXY_URL", "").strip():
+proxy_url = os.getenv("RESIDENTIAL_PROXY_URL", "").strip()
+if proxy_url:
+    logger.info("Patching py_clob_client with residential proxy...")
     patch_clob_globally()
     add_debug_wrapper()  # Temporary: helps diagnose connection issues
+else:
+    logger.warning("⚠️  RESIDENTIAL_PROXY_URL not set - CLOB calls may be blocked")
 
 from config import Config
 from db import Database, WindowRecord
@@ -28,15 +41,6 @@ from risk_manager import RiskManager
 from bet_manager import BetManager
 from notifier import Notifier
 # Bot status now handled via database heartbeat (db.update_bot_status)
-
-# Set log level from config (default to INFO for production)
-log_level = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(
-    level=getattr(logging, log_level, logging.INFO),
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger("vig")
 
 # Suppress verbose HTTP/2 and HPACK debug logs from httpx/httpcore
 logging.getLogger("httpx").setLevel(logging.WARNING)
