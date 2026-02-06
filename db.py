@@ -77,11 +77,10 @@ class Database:
                 raise ImportError("PostgreSQL requested but psycopg2 not installed. Run: pip install psycopg2-binary")
             self.use_postgres = True
             self.database_url = database_url or os.getenv("DATABASE_URL")
-            self.conn = psycopg2.connect(self.database_url)
-            self.conn.set_session(autocommit=False)
-            # Set RealDictCursor as default for all cursors (matches SQLite Row behavior)
+            # Set RealDictCursor at connection time (matches SQLite Row behavior)
             from psycopg2.extras import RealDictCursor
-            self.conn.cursor_factory = RealDictCursor
+            self.conn = psycopg2.connect(self.database_url, cursor_factory=RealDictCursor)
+            self.conn.set_session(autocommit=False)
         else:
             # Use SQLite (backward compatibility)
             self.use_postgres = False
@@ -190,7 +189,8 @@ class Database:
                   bet.token_id, bet.side, bet.price, bet.amount, bet.size,
                   bet.order_id, bet.placed_at, bet.resolved_at, bet.result,
                   bet.payout, bet.profit, bet.paper))
-            bet_id = c.fetchone()[0]
+            row = c.fetchone()
+            bet_id = row['id'] if row else None
         else:
             c.execute("""
                 INSERT INTO bets (window_id, platform, market_id, condition_id, market_question, token_id,
@@ -217,43 +217,35 @@ class Database:
         self.conn.commit()
 
     def get_pending_bets(self, window_id: int) -> list[BetRecord]:
+        c = self.conn.cursor()  # cursor_factory already set globally for PostgreSQL
         if self.use_postgres:
-            from psycopg2.extras import RealDictCursor
-            c = self.conn.cursor(cursor_factory=RealDictCursor)
             c.execute("SELECT * FROM bets WHERE window_id=%s AND result='pending'", (window_id,))
         else:
-            c = self.conn.cursor()
             c.execute("SELECT * FROM bets WHERE window_id=? AND result='pending'", (window_id,))
         return [self._row_to_bet(r) for r in c.fetchall()]
 
     def get_window_bets(self, window_id: int) -> list[BetRecord]:
+        c = self.conn.cursor()  # cursor_factory already set globally for PostgreSQL
         if self.use_postgres:
-            from psycopg2.extras import RealDictCursor
-            c = self.conn.cursor(cursor_factory=RealDictCursor)
             c.execute("SELECT * FROM bets WHERE window_id=%s", (window_id,))
         else:
-            c = self.conn.cursor()
             c.execute("SELECT * FROM bets WHERE window_id=?", (window_id,))
         return [self._row_to_bet(r) for r in c.fetchall()]
 
     def get_recent_bets(self, n: int = 100) -> list[BetRecord]:
+        c = self.conn.cursor()  # cursor_factory already set globally for PostgreSQL
         if self.use_postgres:
-            from psycopg2.extras import RealDictCursor
-            c = self.conn.cursor(cursor_factory=RealDictCursor)
             c.execute("SELECT * FROM bets WHERE result!='pending' ORDER BY id DESC LIMIT %s", (n,))
         else:
-            c = self.conn.cursor()
             c.execute("SELECT * FROM bets WHERE result!='pending' ORDER BY id DESC LIMIT ?", (n,))
         return [self._row_to_bet(r) for r in c.fetchall()]
     
     def get_all_pending_bets(self) -> list[BetRecord]:
         """Get all pending bets regardless of window_id"""
+        c = self.conn.cursor()  # cursor_factory already set globally for PostgreSQL
         if self.use_postgres:
-            from psycopg2.extras import RealDictCursor
-            c = self.conn.cursor(cursor_factory=RealDictCursor)
             c.execute("SELECT * FROM bets WHERE result='pending' ORDER BY id ASC")
         else:
-            c = self.conn.cursor()
             c.execute("SELECT * FROM bets WHERE result='pending' ORDER BY id ASC")
         return [self._row_to_bet(r) for r in c.fetchall()]
 
@@ -314,7 +306,8 @@ class Database:
                   window.bets_won, window.bets_lost, window.bets_pending,
                   window.deployed, window.returned, window.profit,
                   window.pocketed, window.clip_size, window.phase))
-            window_id = c.fetchone()[0]
+            row = c.fetchone()
+            window_id = row['id'] if row else None
         else:
             c.execute("""
                 INSERT INTO windows (started_at, ended_at, bets_placed, bets_won, bets_lost,
@@ -343,12 +336,10 @@ class Database:
         self.conn.commit()
 
     def get_window(self, window_id: int) -> Optional[WindowRecord]:
+        c = self.conn.cursor()  # cursor_factory already set globally for PostgreSQL
         if self.use_postgres:
-            from psycopg2.extras import RealDictCursor
-            c = self.conn.cursor(cursor_factory=RealDictCursor)
             c.execute("SELECT * FROM windows WHERE id=%s", (window_id,))
         else:
-            c = self.conn.cursor()
             c.execute("SELECT * FROM windows WHERE id=?", (window_id,))
         row = c.fetchone()
         if row:
@@ -357,12 +348,10 @@ class Database:
         return None
 
     def get_recent_windows(self, n: int = 20) -> list[WindowRecord]:
+        c = self.conn.cursor()  # cursor_factory already set globally for PostgreSQL
         if self.use_postgres:
-            from psycopg2.extras import RealDictCursor
-            c = self.conn.cursor(cursor_factory=RealDictCursor)
             c.execute("SELECT * FROM windows ORDER BY id DESC LIMIT %s", (n,))
         else:
-            c = self.conn.cursor()
             c.execute("SELECT * FROM windows ORDER BY id DESC LIMIT ?", (n,))
         rows = c.fetchall()
         # Convert to dict if needed (PostgreSQL RealDictRow is already dict-like, SQLite Row is dict-like)
@@ -380,11 +369,7 @@ class Database:
         self.conn.commit()
 
     def get_consecutive_losses(self) -> int:
-        if self.use_postgres:
-            from psycopg2.extras import RealDictCursor
-            c = self.conn.cursor(cursor_factory=RealDictCursor)
-        else:
-            c = self.conn.cursor()
+        c = self.conn.cursor()  # cursor_factory already set globally for PostgreSQL
         c.execute("SELECT result FROM bets WHERE result!='pending' ORDER BY id DESC")
         streak = 0
         for row in c.fetchall():
