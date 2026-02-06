@@ -86,6 +86,11 @@ def setup_clob_proxy():
         # Also set NO_PROXY to empty to ensure proxy is used
         # (some environments have NO_PROXY set which can prevent proxy usage)
         os.environ.pop("NO_PROXY", None)
+        os.environ.pop("no_proxy", None)  # Also check lowercase version
+        
+        # Set httpx to trust environment variables (required for proxy to work)
+        # This ensures httpx respects HTTPS_PROXY even if ClobClient creates its own httpx client
+        os.environ["HTTPX_TRUST_ENV"] = "1"
         
         # Log (without exposing credentials)
         proxy_display = proxy_url.split("@")[0] + "@..." if "@" in proxy_url else proxy_url[:20] + "..."

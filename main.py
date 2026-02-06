@@ -83,11 +83,29 @@ def main():
                 key = config.private_key
                 chain_id = config.chain_id
                 clob_client = get_clob_client_with_proxy(host, key=key, chain_id=chain_id)
+                
+                # Test the connection by creating API creds (this makes an HTTP request)
+                logger.info("Testing proxy connection by creating API credentials...")
                 creds = clob_client.create_or_derive_api_creds()
                 clob_client.set_api_creds(creds)
                 logger.info("✅ CLOB client initialized with residential proxy")
             except Exception as e:
+                import traceback
+                error_details = traceback.format_exc()
                 logger.warning(f"⚠️  Proxy initialization failed: {e}")
+                logger.debug(f"Full error traceback:\n{error_details}")
+                
+                # Check for specific error types
+                error_str = str(e).lower()
+                if "timeout" in error_str or "connection" in error_str:
+                    logger.error("Proxy connection failed - check if proxy server is accessible")
+                elif "ssl" in error_str or "certificate" in error_str:
+                    logger.error("SSL/TLS error - proxy might need different SSL settings")
+                elif "403" in error_str or "401" in error_str:
+                    logger.error("Proxy authentication failed - check username/password")
+                else:
+                    logger.error(f"Unknown proxy error: {e}")
+                
                 logger.info("Falling back to direct connection...")
                 clob_client = None
         
