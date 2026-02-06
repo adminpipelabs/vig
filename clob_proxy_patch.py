@@ -109,6 +109,15 @@ def patch_clob_globally():
                 logger.info(f"✅ Verified proxy is set in httpx client: {bool(proxy_set)}")
             else:
                 logger.warning("⚠️  Could not verify proxy in httpx client - may need different approach")
+        
+        # Assign the patched init
+        clob_module.ClobClient.__init__ = _patched_init
+        logger.info("✅ py_clob_client globally patched with residential proxy")
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to patch py_clob_client: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 
 def _patch_httpx_globally():
@@ -134,14 +143,6 @@ def _patch_httpx_globally():
     
     httpx.Client.__init__ = _patched_client_init
     logger.info("✅ httpx.Client globally patched as fallback")
-        
-        clob_module.ClobClient.__init__ = _patched_init
-        logger.info("✅ py_clob_client globally patched with residential proxy")
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to patch py_clob_client: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
 
 
 def add_debug_wrapper():
