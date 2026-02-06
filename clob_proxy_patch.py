@@ -32,20 +32,44 @@ def patch_clob_globally():
             # Call original init first
             _original_init(self, *args, **kwargs)
             
-            # Find the httpx client - it might be stored as 'client', '_client', or 'http_client'
+            # Debug: List all attributes to find the httpx client
+            all_attrs = [attr for attr in dir(self) if not attr.startswith('__')]
+            logger.debug(f"ClobClient attributes: {all_attrs}")
+            
+            # Find the httpx client - check multiple possible names
             client_attr = None
-            for attr_name in ['client', '_client', 'http_client', '_http_client']:
+            old_client = None
+            
+            for attr_name in ['client', '_client', 'http_client', '_http_client', '_session', 'session']:
                 if hasattr(self, attr_name):
-                    client_attr = attr_name
-                    break
+                    candidate = getattr(self, attr_name)
+                    # Check if it's an httpx.Client instance
+                    if isinstance(candidate, httpx.Client):
+                        client_attr = attr_name
+                        old_client = candidate
+                        logger.info(f"Found httpx client at attribute: {attr_name}")
+                        break
             
-            if not client_attr:
-                logger.warning("⚠️  Could not find httpx client attribute in ClobClient - patch may not work")
-                return
+            if not client_attr or not old_client:
+                # Try to find any httpx-like object
+                for attr_name in all_attrs:
+                    try:
+                        candidate = getattr(self, attr_name)
+                        if hasattr(candidate, 'request') and hasattr(candidate, 'headers'):
+                            # Looks like an HTTP client
+                            client_attr = attr_name
+                            old_client = candidate
+                            logger.info(f"Found HTTP client-like object at attribute: {attr_name} (type: {type(candidate).__name__})")
+                            break
+                    except:
+                        continue
             
-            old_client = getattr(self, client_attr)
-            if not old_client:
-                logger.warning("⚠️  ClobClient httpx client is None - patch may not work")
+            if not client_attr or not old_client:
+                logger.error("❌ Could not find httpx client attribute in ClobClient")
+                logger.error(f"Available attributes: {all_attrs}")
+                logger.error("Attempting alternative approach: patching httpx.Client globally...")
+                # Fallback: patch httpx.Client to always use proxy
+                _patch_httpx_globally()
                 return
             
             # Get old headers and base_url
@@ -85,6 +109,31 @@ def patch_clob_globally():
                 logger.info(f"✅ Verified proxy is set in httpx client: {bool(proxy_set)}")
             else:
                 logger.warning("⚠️  Could not verify proxy in httpx client - may need different approach")
+
+
+def _patch_httpx_globally():
+    """
+    Fallback: Patch httpx.Client to always use proxy if client attribute not found.
+    """
+    _original_client_init = httpx.Client.__init__
+    
+    def _patched_client_init(self, *args, **kwargs):
+        # Call original init
+        _original_client_init(self, *args, **kwargs)
+        
+        # If proxy not already set, add it
+        if 'proxy' not in kwargs and not getattr(self, '_proxy', None):
+            # Set proxy on the client
+            try:
+                # httpx stores proxy in _proxy or proxies dict
+                if not hasattr(self, '_proxy'):
+                    self._proxy = PROXY_URL
+                logger.debug(f"httpx.Client patched with proxy: {PROXY_URL.split('@')[-1] if '@' in PROXY_URL else '...'}")
+            except:
+                pass
+    
+    httpx.Client.__init__ = _patched_client_init
+    logger.info("✅ httpx.Client globally patched as fallback")
         
         clob_module.ClobClient.__init__ = _patched_init
         logger.info("✅ py_clob_client globally patched with residential proxy")
