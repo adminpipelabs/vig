@@ -160,7 +160,9 @@ if _is_valid_proxy():
         except Exception as e:
             _logger.warning(f"⚠️  Polymarket test error: {e}")
     
-    # Run test immediately (blocking) so we see results in logs
-    _test_proxy()
+    # Run test in background - don't block app startup
+    # Results will appear in logs within 10 seconds
+    import threading
+    threading.Thread(target=_test_proxy, daemon=True).start()
 else:
     print("NO PROXY: RESIDENTIAL_PROXY_URL invalid or unset")
