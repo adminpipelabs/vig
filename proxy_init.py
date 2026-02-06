@@ -83,8 +83,16 @@ if _is_valid_proxy():
     print(f"PROXY ACTIVE: {_display}")
     
     # Test proxy connection at startup - BLOCKING so we see results immediately
+    # Use print() since logging might not be initialized yet when proxy_init runs
     import logging
-    _logger = logging.getLogger("vig.proxy")
+    try:
+        _logger = logging.getLogger("vig.proxy")
+    except:
+        # Fallback to print if logging not ready
+        class _PrintLogger:
+            def info(self, msg): print(msg)
+            def error(self, msg): print(msg)
+        _logger = _PrintLogger()
     
     def _test_proxy():
         _logger.info("=" * 70)
