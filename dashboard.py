@@ -968,10 +968,10 @@ canvas { width:100%!important; height:100%!important; }
     </div>
   </div>
 
-  <!-- Pending Bets -->
+  <!-- Active Bets -->
   <div class="card" style="margin-bottom:16px" id="pendingCard" hidden>
     <div class="card-header">
-      <div class="card-title">Pending Bets</div>
+      <div class="card-title">Active Bets</div>
       <span class="tag pending" id="pendingCount">0</span>
     </div>
     <div class="table-wrap" id="pendingTable"></div>
@@ -1006,8 +1006,8 @@ canvas { width:100%!important; height:100%!important; }
 
   <!-- Windows + Bets Tables -->
   <div class="grid grid-2">
-    <div class="card"><div class="card-header"><div class="card-title">Recent Windows</div></div><div class="table-wrap" id="windowsTable"><div class="empty"><div class="empty-icon">&#9678;</div><div>No windows yet</div></div></div></div>
-    <div class="card"><div class="card-header"><div class="card-title">Recent Bets</div></div><div class="table-wrap" id="betsTable"><div class="empty"><div class="empty-icon">&#9678;</div><div>No bets yet</div></div></div></div>
+    <div class="card"><div class="card-header"><div class="card-title">Trading Windows</div></div><div class="table-wrap" id="windowsTable"><div class="empty"><div class="empty-icon">&#9678;</div><div>No windows yet</div></div></div></div>
+    <div class="card"><div class="card-header"><div class="card-title">All Bets</div></div><div class="table-wrap" id="betsTable"><div class="empty"><div class="empty-icon">&#9678;</div><div>No bets yet</div></div></div></div>
   </div>
   </div>
 
