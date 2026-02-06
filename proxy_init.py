@@ -51,16 +51,9 @@ else:
     print("   Checked: RESIDENTIAL_PROXY_URL, HTTPS_PROXY, HTTP_PROXY")
 print("=" * 70)
 
-# Get the proxy URL - prefer RESIDENTIAL_PROXY_URL, fallback to HTTPS_PROXY
-PROXY_URL = os.getenv("RESIDENTIAL_PROXY_URL", "").strip()
-if not PROXY_URL:
-    # Try with leading/trailing spaces (Railway quirk)
-    PROXY_URL = os.getenv(" RESIDENTIAL_PROXY_URL", "").strip()
-if not PROXY_URL:
-    PROXY_URL = os.getenv("RESIDENTIAL_PROXY_URL ", "").strip()
-if not PROXY_URL:
-    # Fallback to HTTPS_PROXY
-    PROXY_URL = os.getenv("HTTPS_PROXY", "").strip()
+# HARDCODED PROXY URL - Get bot trading immediately
+# TODO: Move back to environment variable once Railway variable issue is resolved
+PROXY_URL = "http://brd-customer-hl_b4689439-zone-residential_proxy1:5teowbs6s9c9@brd.superproxy.io:33335"
 
 if PROXY_URL:
     print(f"✅ Using proxy URL: {PROXY_URL.split('@')[-1] if '@' in PROXY_URL else PROXY_URL[:50]}...")
@@ -118,10 +111,19 @@ if is_valid_proxy():
             
             # Verify proxy URL format is correct
             proxy_to_use = kwargs.get('proxy', PROXY_URL)
-            if proxy_to_use and not proxy_to_use.startswith('http://') and not proxy_to_use.startswith('https://'):
-                print(f"⚠️  WARNING: Proxy URL doesn't start with http:// or https://: {proxy_to_use[:50]}")
-            if proxy_to_use and '@' not in proxy_to_use:
-                print(f"⚠️  WARNING: Proxy URL missing @ separator (no auth?): {proxy_to_use[:50]}")
+            if proxy_to_use:
+                if not proxy_to_use.startswith('http://') and not proxy_to_use.startswith('https://'):
+                    print(f"⚠️  WARNING: Proxy URL doesn't start with http:// or https://: {proxy_to_use[:50]}")
+                if '@' not in proxy_to_use:
+                    print(f"⚠️  WARNING: Proxy URL missing @ separator (no auth?): {proxy_to_use[:50]}")
+                # Log that we're injecting proxy (redacted)
+                if "@" in proxy_to_use:
+                    parts = proxy_to_use.split("@")
+                    if ":" in parts[0]:
+                        user_pass = parts[0].split(":")
+                        if len(user_pass) >= 2:
+                            redacted = f"{user_pass[0]}:****@{parts[1]}"
+                            print(f"✅ Injecting proxy into httpx.Client: {redacted}")
             
             # Add browser-like headers to help bypass Cloudflare
             if 'headers' not in kwargs:
