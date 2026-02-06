@@ -48,6 +48,17 @@ if is_valid_proxy():
             elif 'proxy' not in kwargs:
                 # If proxies dict exists but proxy doesn't, add it
                 kwargs['proxy'] = PROXY_URL
+            
+            # Add browser-like headers to help bypass Cloudflare
+            if 'headers' not in kwargs:
+                kwargs['headers'] = {}
+            headers = kwargs['headers']
+            headers.setdefault('User-Agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+            headers.setdefault('Accept', 'application/json')
+            headers.setdefault('Accept-Language', 'en-US,en;q=0.9')
+            headers.setdefault('Accept-Encoding', 'gzip, deflate, br')
+            headers.setdefault('Connection', 'keep-alive')
+            
             super().__init__(*args, **kwargs)
     
     class ProxiedAsyncClient(_OriginalAsyncClient):
@@ -56,12 +67,20 @@ if is_valid_proxy():
             # Always inject proxy if not already set
             if 'proxy' not in kwargs and 'proxies' not in kwargs:
                 kwargs['proxy'] = PROXY_URL
-            elif 'proxies' not in kwargs:
-                kwargs['proxies'] = {
-                    'http://': PROXY_URL,
-                    'https://': PROXY_URL
-                }
-                kwargs.pop('proxy', None)
+            elif 'proxies' in kwargs and not kwargs['proxies']:
+                kwargs['proxy'] = PROXY_URL
+                kwargs.pop('proxies', None)
+            elif 'proxy' not in kwargs:
+                kwargs['proxy'] = PROXY_URL
+            
+            # Add browser-like headers
+            if 'headers' not in kwargs:
+                kwargs['headers'] = {}
+            headers = kwargs['headers']
+            headers.setdefault('User-Agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+            headers.setdefault('Accept', 'application/json')
+            headers.setdefault('Accept-Language', 'en-US,en;q=0.9')
+            
             super().__init__(*args, **kwargs)
     
     # Replace httpx classes
