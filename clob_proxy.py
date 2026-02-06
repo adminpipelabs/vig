@@ -23,7 +23,7 @@ def setup_clob_proxy():
     and HTTP_PROXY environment variables. We set these only for CLOB
     API calls by setting them before ClobClient initialization.
     """
-    proxy_url = os.getenv("RESIDENTIAL_PROXY_URL", "")
+    proxy_url = os.getenv("RESIDENTIAL_PROXY_URL", "").strip()
     
     if proxy_url:
         # Set environment variables that httpx will automatically use
