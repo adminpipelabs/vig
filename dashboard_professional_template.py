@@ -267,13 +267,12 @@ PROFESSIONAL_DASHBOARD_HTML = '''<!DOCTYPE html>
 
         async function refreshDashboard() {
             console.log('Refreshing dashboard...');
-            const [stats, balance, pending, botStatus, dailyStats, historicalSummary] = await Promise.all([
+            // Only fetch essential data that changes frequently
+            const [stats, balance, pending, botStatus] = await Promise.all([
                 fetchJSON('/api/stats'),
                 fetchJSON('/api/wallet/balance'),
                 fetchJSON('/api/pending'),
-                fetchJSON('/api/bot-status'),
-                fetchJSON('/api/daily-stats?days=7'),
-                fetchJSON('/api/historical-summary')
+                fetchJSON('/api/bot-status')
             ]);
 
             console.log('API Results:', { stats: !!stats, balance: !!balance, pending: !!pending, botStatus: !!botStatus });
@@ -340,25 +339,38 @@ PROFESSIONAL_DASHBOARD_HTML = '''<!DOCTYPE html>
                 document.getElementById('nextScan').textContent = '--';
             }
 
-            // Update historical summary
-            if (historicalSummary) {
-                if (historicalSummary.last_24h) {
-                    const h24 = historicalSummary.last_24h;
-                    document.getElementById('stats24h').textContent = `${h24.total_bets} bets, ${h24.win_rate}% WR, ${formatCurrency(h24.profit)}`;
+        }
+        
+        // Load performance tracking only once on page load (not on every refresh)
+        async function loadPerformanceTracking() {
+            try {
+                const [dailyStats, historicalSummary] = await Promise.all([
+                    fetchJSON('/api/daily-stats?days=7'),
+                    fetchJSON('/api/historical-summary')
+                ]);
+                
+                // Update historical summary
+                if (historicalSummary) {
+                    if (historicalSummary.last_24h) {
+                        const h24 = historicalSummary.last_24h;
+                        document.getElementById('stats24h').textContent = `${h24.total_bets} bets, ${h24.win_rate}% WR, ${formatCurrency(h24.profit)}`;
+                    }
+                    if (historicalSummary.last_7d) {
+                        const h7 = historicalSummary.last_7d;
+                        document.getElementById('stats7d').textContent = `${h7.total_bets} bets, ${h7.win_rate}% WR, ${formatCurrency(h7.profit)}`;
+                    }
+                    if (historicalSummary.last_30d) {
+                        const h30 = historicalSummary.last_30d;
+                        document.getElementById('stats30d').textContent = `${h30.total_bets} bets, ${h30.win_rate}% WR, ${formatCurrency(h30.profit)}`;
+                    }
                 }
-                if (historicalSummary.last_7d) {
-                    const h7 = historicalSummary.last_7d;
-                    document.getElementById('stats7d').textContent = `${h7.total_bets} bets, ${h7.win_rate}% WR, ${formatCurrency(h7.profit)}`;
-                }
-                if (historicalSummary.last_30d) {
-                    const h30 = historicalSummary.last_30d;
-                    document.getElementById('stats30d').textContent = `${h30.total_bets} bets, ${h30.win_rate}% WR, ${formatCurrency(h30.profit)}`;
-                }
-            }
 
-            // Update daily stats table
-            if (dailyStats && dailyStats.daily_stats) {
-                updateDailyStatsTable(dailyStats.daily_stats);
+                // Update daily stats table
+                if (dailyStats && dailyStats.daily_stats) {
+                    updateDailyStatsTable(dailyStats.daily_stats);
+                }
+            } catch (e) {
+                console.error('Error loading performance tracking:', e);
             }
         }
 
@@ -531,8 +543,13 @@ PROFESSIONAL_DASHBOARD_HTML = '''<!DOCTYPE html>
         }
 
         // Initialize
+        // Load essential data immediately
         refreshDashboard();
+        // Refresh essential data every 15 seconds
         refreshInterval = setInterval(refreshDashboard, 15000);
+        
+        // Load performance tracking once on page load (doesn't need frequent updates)
+        loadPerformanceTracking();
     </script>
 </body>
 </html>'''
