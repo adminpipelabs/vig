@@ -485,12 +485,17 @@ PROFESSIONAL_DASHBOARD_HTML = '''<!DOCTYPE html>
         }
 
         // Initialize
+        let recentActivityInterval = null;
+        
         // Load essential data immediately
         refreshDashboard();
         refreshRecentActivity();
         
         // Refresh live markets (active positions) every 10 seconds - frequent updates
         refreshInterval = setInterval(refreshDashboard, 10000);
+        
+        // Refresh recent activity less frequently (every 60 seconds)
+        recentActivityInterval = setInterval(refreshRecentActivity, 60000);
         
         // Refresh recent activity every 60 seconds - less frequent updates
         activityInterval = setInterval(refreshRecentActivity, 60000);
