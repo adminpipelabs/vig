@@ -3,6 +3,7 @@ Vig v1 Bet Manager — Place bets and track settlements.
 """
 import logging
 import random
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
