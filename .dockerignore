@@ -1,9 +1,18 @@
-.env
-*.db
+# Keep .dockerignore minimal - only exclude what's truly not needed
+*.md
+!README.md
 *.log
+*.sh
+!setup.sh
 __pycache__/
 *.pyc
-.git
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+.env
+*.db
+*.sqlite
+.git/
 .gitignore
-*.md
-.DS_Store

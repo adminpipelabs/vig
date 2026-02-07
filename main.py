@@ -1,12 +1,6 @@
 """
 Vig v1 — Main loop. Scan → Bet → Settle → Snowball → Repeat.
-
-CRITICAL: proxy_init MUST be imported FIRST to patch httpx before any other modules use it.
 """
-# ============================================
-# STEP 1: Patch httpx BEFORE anything else
-# ============================================
-import proxy_init  # MUST be first import - patches httpx.Client before py_clob_client uses it
 
 import os
 import sys
@@ -26,10 +20,6 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("vig")
-
-# Debug wrapper for detailed error logging (optional, helps diagnose)
-from clob_proxy_patch import add_debug_wrapper
-add_debug_wrapper()
 
 from config import Config
 from db import Database, WindowRecord
@@ -82,18 +72,18 @@ def main():
     notifier = Notifier(config)
 
     # CLOB client only for live mode
-    # Note: py_clob_client is already patched at module level (see top of file)
+    # Initialize CLOB client for live trading
     clob_client = None
     if not config.paper_mode:
         try:
-            logger.info("Initializing CLOB client (proxy already patched if RESIDENTIAL_PROXY_URL is set)...")
+            logger.info("Initializing CLOB client...")
             from py_clob_client.client import ClobClient
             
             host = config.clob_url
             key = config.private_key
             chain_id = config.chain_id
             
-            # Create client - proxy is already patched globally if RESIDENTIAL_PROXY_URL is set
+            # Create client
             clob_client = ClobClient(host, key=key, chain_id=chain_id)
             
             # Test the connection by creating API creds (this makes an HTTP request)
@@ -101,8 +91,7 @@ def main():
             creds = clob_client.create_or_derive_api_creds()
             clob_client.set_api_creds(creds)
             
-            proxy_status = "with residential proxy" if os.getenv("RESIDENTIAL_PROXY_URL", "").strip() else "direct connection"
-            logger.info(f"✅ CLOB client initialized ({proxy_status})")
+            logger.info(f"✅ CLOB client initialized (direct connection)")
             
         except Exception as e:
             import traceback
@@ -113,11 +102,11 @@ def main():
             # Check for specific error types
             error_str = str(e).lower()
             if "timeout" in error_str or "connection" in error_str:
-                logger.error("Connection failed - check proxy server accessibility or network connectivity")
+                logger.error("Connection failed - check network connectivity")
             elif "ssl" in error_str or "certificate" in error_str:
-                logger.error("SSL/TLS error - proxy might need different SSL settings")
+                logger.error("SSL/TLS error - check network configuration")
             elif "403" in error_str or "401" in error_str or "cloudflare" in error_str:
-                logger.error("Request blocked - proxy may not be working correctly")
+                logger.error("Request blocked - check CLOB API access")
             else:
                 logger.error(f"Unknown error: {e}")
             
@@ -129,8 +118,8 @@ def main():
             logger.error("  - ✅ Dashboard will show scanning activity")
             logger.error("=" * 60)
             logger.error("To enable betting:")
-            logger.error("  1. Verify RESIDENTIAL_PROXY_URL is set correctly in Railway")
-            logger.error("  2. Check proxy is accessible and working")
+            logger.error("  1. Verify network connectivity to CLOB API")
+            logger.error("  2. Check CLOB API credentials and access")
             logger.error("  3. Review error details above for specific issue")
             logger.error("=" * 60)
             clob_client = None
@@ -167,7 +156,38 @@ def main():
             # Update bot heartbeat: starting window
             db.update_bot_status("main", "scanning", f"Window {window_count}")
 
-            # 1. Pre-window risk check
+            # 0. Settle pending bets FIRST (before circuit breaker check)
+            # This allows win rate to improve even if bot was stopped
+            all_pending = db.get_all_pending_bets()
+            if all_pending:
+                logger.info(f"Settling {len(all_pending)} pending bets before risk check...")
+                db.update_bot_status("main", "scanning", f"Window {window_count} - Settling {len(all_pending)} pending bets")
+                settled_count = 0
+                for bet in all_pending:
+                    try:
+                        logger.debug(f"[SETTLEMENT] Checking bet {bet.id}: {bet.market_question[:50]}")
+                        if config.paper_mode:
+                            result_check, payout = bet_mgr._simulate_settlement(bet)
+                        else:
+                            result_check, payout = bet_mgr._check_live_settlement(bet)
+                        logger.debug(f"[SETTLEMENT] Bet {bet.id} result: {result_check}, payout: {payout}")
+                        
+                        if result_check != "pending":
+                            profit = payout - bet.amount if result_check == "won" else -bet.amount
+                            db.update_bet_result(bet.id, result_check, payout, profit)
+                            emoji = "W" if result_check == "won" else "L"
+                            logger.info(f"  [{emoji}] Settled pending bet: {bet.market_question[:40]} -> {result_check}")
+                            settled_count += 1
+                        else:
+                            logger.debug(f"[SETTLEMENT] Bet {bet.id} still pending")
+                    except Exception as e:
+                        logger.error(f"[SETTLEMENT] ERROR on bet {bet.id} ({bet.market_question[:40]}): {e}")
+                        import traceback
+                        logger.error(traceback.format_exc())
+                if settled_count > 0:
+                    logger.info(f"✅ Settled {settled_count} pending bets before risk check")
+
+            # 1. Pre-window risk check (now with updated bet results)
             alerts = risk_mgr.check_pre_window()
             if risk_mgr.should_stop(alerts):
                 for a in alerts:
@@ -243,45 +263,11 @@ def main():
                     if elapsed % 300 == 0:
                         logger.info(f"  Still waiting... {len(pending)} pending, {elapsed}s elapsed")
 
-            # 6. Settle bets
-            logger.info("Settling bets...")
+            # 6. Settle bets from current window
+            logger.info("Settling bets from current window...")
             db.update_bot_status("main", "scanning", f"Window {window_id} - Settling bets")
-            # First settle bets from current window
+            # Settle bets from current window (old pending bets already settled upfront)
             result = bet_mgr.settle_bets(window_id)
-            
-            # Also check and settle any pending bets from previous windows
-            all_pending = db.get_all_pending_bets()
-            old_pending = [b for b in all_pending if b.window_id != window_id]
-            if old_pending:
-                logger.info(f"Checking {len(old_pending)} pending bets from previous windows...")
-                for bet in old_pending:
-                    try:
-                        logger.debug(f"[SETTLEMENT] Checking bet {bet.id}: {bet.market_question[:50]}")
-                        if config.paper_mode:
-                            result_check, payout = bet_mgr._simulate_settlement(bet)
-                        else:
-                            result_check, payout = bet_mgr._check_live_settlement(bet)
-                        logger.debug(f"[SETTLEMENT] Bet {bet.id} result: {result_check}, payout: {payout}")
-                        
-                        if result_check != "pending":
-                            profit = payout - bet.amount if result_check == "won" else -bet.amount
-                            db.update_bet_result(bet.id, result_check, payout, profit)
-                            emoji = "W" if result_check == "won" else "L"
-                            logger.info(f"  [{emoji}] Settled old bet: {bet.market_question[:40]} -> {result_check}")
-                            # Update result counts
-                            if result_check == "won":
-                                result["wins"] += 1
-                                result["returned"] = result.get("returned", 0) + payout
-                            else:
-                                result["losses"] += 1
-                            result["profit"] += profit
-                            result["settled"] += 1
-                        else:
-                            logger.debug(f"[SETTLEMENT] Bet {bet.id} still pending")
-                    except Exception as e:
-                        logger.error(f"[SETTLEMENT] ERROR on bet {bet.id} ({bet.market_question[:40]}): {e}")
-                        import traceback
-                        logger.error(traceback.format_exc())
 
             wins = result["wins"]
             losses = result["losses"]
