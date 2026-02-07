@@ -376,6 +376,44 @@ PROFESSIONAL_DASHBOARD_HTML = '''<!DOCTYPE html>
             tbody.innerHTML = html;
         }
 
+        function updateRecentActivity(bets) {
+            const container = document.getElementById('activityFeed');
+            if (!bets || bets.length === 0) {
+                container.innerHTML = '<div class="px-5 py-8 text-center text-sm text-gray-500">No recent activity</div>';
+                return;
+            }
+
+            let html = '';
+            for (const bet of bets.slice(0, 10)) {
+                const market = (bet.market_question || '').substring(0, 60) + ((bet.market_question || '').length > 60 ? '...' : '');
+                const side = bet.side || '--';
+                const result = bet.result || 'pending';
+                const resultClass = result === 'won' ? 'text-success' : result === 'lost' ? 'text-danger' : 'text-warning';
+                const resultBadge = result === 'won' ? 'bg-green-100 text-green-800' : result === 'lost' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800';
+                const resultText = result === 'won' ? 'Won' : result === 'lost' ? 'Lost' : 'Pending';
+                
+                html += `
+                    <div class="px-5 py-3 hover:bg-gray-50">
+                        <div class="flex items-start justify-between">
+                            <div class="flex-1">
+                                <div class="text-sm font-medium text-gray-900">${market}</div>
+                                <div class="flex items-center gap-2 mt-1">
+                                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${side === 'YES' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}">${side}</span>
+                                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${resultBadge}">${resultText}</span>
+                                    <span class="text-xs text-gray-500">${formatCurrency(bet.amount)}</span>
+                                </div>
+                            </div>
+                            <div class="text-right ml-4">
+                                <div class="text-xs text-gray-500">${timeAgo(bet.placed_at)}</div>
+                                ${bet.profit !== null && bet.profit !== undefined ? `<div class="text-xs font-medium ${bet.profit >= 0 ? 'text-success' : 'text-danger'} mt-1">${formatCurrency(bet.profit)}</div>` : ''}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+            container.innerHTML = html;
+        }
+
         function updateBotStatus(status) {
             const statusMap = {
                 'running': { dot: 'bg-success', text: 'Running', activity: 'Active' },
