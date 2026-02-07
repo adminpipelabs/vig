@@ -197,17 +197,10 @@ PROFESSIONAL_DASHBOARD_HTML = '''<!DOCTYPE html>
             return Math.floor(s / 86400) + 'd ago';
         }
 
-        // Get API key from localStorage or prompt user
+        // Get API key from localStorage (no prompt for now)
         function getApiKey() {
-            let apiKey = localStorage.getItem('dashboard_api_key');
-            if (!apiKey) {
-                // Prompt for API key on first load
-                apiKey = prompt('Enter Dashboard API Key (or leave empty if not configured):');
-                if (apiKey) {
-                    localStorage.setItem('dashboard_api_key', apiKey);
-                }
-            }
-            return apiKey;
+            // Return null - no API key required for now
+            return localStorage.getItem('dashboard_api_key') || null;
         }
 
         async function fetchJSON(url) {
@@ -220,18 +213,9 @@ PROFESSIONAL_DASHBOARD_HTML = '''<!DOCTYPE html>
                 
                 const r = await fetch(url, { headers });
                 
-                // Handle 401 Unauthorized
+                // Handle 401 Unauthorized (skip for now - no API key required)
                 if (r.status === 401) {
-                    localStorage.removeItem('dashboard_api_key');
-                    const newKey = prompt('API key required. Enter Dashboard API Key:');
-                    if (newKey) {
-                        localStorage.setItem('dashboard_api_key', newKey);
-                        // Retry with new key
-                        headers['X-API-Key'] = newKey;
-                        const retry = await fetch(url, { headers });
-                        if (!retry.ok) return null;
-                        return await retry.json();
-                    }
+                    console.warn('API returned 401 - authentication may be required');
                     return null;
                 }
                 
