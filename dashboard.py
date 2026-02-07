@@ -544,6 +544,218 @@ def api_pnl_flow():
     }
 
 
+@app.get("/api/daily-stats", dependencies=[Depends(require_api_key)])
+def api_daily_stats(days: int = 7):
+    """Get daily performance statistics for the last N days"""
+    conn = get_db()
+    is_pg = is_postgres(conn)
+    if is_pg:
+        from psycopg2.extras import RealDictCursor
+        c = conn.cursor(cursor_factory=RealDictCursor)
+    else:
+        c = conn.cursor()
+    
+    # Get daily stats (SQLite vs PostgreSQL compatible)
+    if is_pg:
+        c.execute("""
+            SELECT 
+                DATE(placed_at) as date,
+                COUNT(*) as total_bets,
+                SUM(CASE WHEN result='won' THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN result='lost' THEN 1 ELSE 0 END) as losses,
+                SUM(CASE WHEN result='pending' THEN 1 ELSE 0 END) as pending,
+                COALESCE(SUM(profit), 0) as profit,
+                COALESCE(SUM(amount), 0) as deployed
+            FROM bets
+            WHERE placed_at >= CURRENT_DATE - INTERVAL '%s days'
+            GROUP BY DATE(placed_at)
+            ORDER BY date DESC
+        """, (days,))
+    else:
+        # SQLite version
+        c.execute("""
+            SELECT 
+                DATE(placed_at) as date,
+                COUNT(*) as total_bets,
+                SUM(CASE WHEN result='won' THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN result='lost' THEN 1 ELSE 0 END) as losses,
+                SUM(CASE WHEN result='pending' THEN 1 ELSE 0 END) as pending,
+                COALESCE(SUM(profit), 0) as profit,
+                COALESCE(SUM(amount), 0) as deployed
+            FROM bets
+            WHERE placed_at >= datetime('now', '-' || ? || ' days')
+            GROUP BY DATE(placed_at)
+            ORDER BY date DESC
+        """, (days,))
+    
+    daily_rows = c.fetchall()
+    daily_stats = []
+    for row in daily_rows:
+        row_dict = dict(row)
+        wins = row_dict.get("wins") or 0
+        losses = row_dict.get("losses") or 0
+        resolved = wins + losses
+        win_rate = (wins / resolved * 100) if resolved > 0 else 0
+        
+        daily_stats.append({
+            "date": str(row_dict["date"]),
+            "total_bets": row_dict.get("total_bets") or 0,
+            "wins": wins,
+            "losses": losses,
+            "pending": row_dict.get("pending") or 0,
+            "win_rate": round(win_rate, 1),
+            "profit": float(row_dict.get("profit") or 0),
+            "deployed": float(row_dict.get("deployed") or 0)
+        })
+    
+    return {"daily_stats": daily_stats, "days": days}
+
+
+@app.get("/api/historical-summary", dependencies=[Depends(require_api_key)])
+def api_historical_summary():
+    """Get summary statistics for different time periods"""
+    conn = get_db()
+    if is_postgres(conn):
+        from psycopg2.extras import RealDictCursor
+        c = conn.cursor(cursor_factory=RealDictCursor)
+    else:
+        c = conn.cursor()
+    
+    summary = {}
+    
+    is_pg = is_postgres(conn)
+    
+    # Last 24 hours
+    if is_pg:
+        c.execute("""
+            SELECT 
+                COUNT(*) as total_bets,
+                SUM(CASE WHEN result='won' THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN result='lost' THEN 1 ELSE 0 END) as losses,
+                COALESCE(SUM(profit), 0) as profit
+            FROM bets
+            WHERE placed_at >= NOW() - INTERVAL '24 hours'
+        """)
+    else:
+        c.execute("""
+            SELECT 
+                COUNT(*) as total_bets,
+                SUM(CASE WHEN result='won' THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN result='lost' THEN 1 ELSE 0 END) as losses,
+                COALESCE(SUM(profit), 0) as profit
+            FROM bets
+            WHERE placed_at >= datetime('now', '-24 hours')
+        """)
+    row = c.fetchone()
+    if row:
+        d = dict(row)
+        wins = d.get("wins") or 0
+        losses = d.get("losses") or 0
+        resolved = wins + losses
+        summary["last_24h"] = {
+            "total_bets": d.get("total_bets") or 0,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": round((wins / resolved * 100) if resolved > 0 else 0, 1),
+            "profit": float(d.get("profit") or 0)
+        }
+    
+    # Last 7 days
+    if is_pg:
+        c.execute("""
+            SELECT 
+                COUNT(*) as total_bets,
+                SUM(CASE WHEN result='won' THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN result='lost' THEN 1 ELSE 0 END) as losses,
+                COALESCE(SUM(profit), 0) as profit
+            FROM bets
+            WHERE placed_at >= NOW() - INTERVAL '7 days'
+        """)
+    else:
+        c.execute("""
+            SELECT 
+                COUNT(*) as total_bets,
+                SUM(CASE WHEN result='won' THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN result='lost' THEN 1 ELSE 0 END) as losses,
+                COALESCE(SUM(profit), 0) as profit
+            FROM bets
+            WHERE placed_at >= datetime('now', '-7 days')
+        """)
+    row = c.fetchone()
+    if row:
+        d = dict(row)
+        wins = d.get("wins") or 0
+        losses = d.get("losses") or 0
+        resolved = wins + losses
+        summary["last_7d"] = {
+            "total_bets": d.get("total_bets") or 0,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": round((wins / resolved * 100) if resolved > 0 else 0, 1),
+            "profit": float(d.get("profit") or 0)
+        }
+    
+    # Last 30 days
+    if is_pg:
+        c.execute("""
+            SELECT 
+                COUNT(*) as total_bets,
+                SUM(CASE WHEN result='won' THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN result='lost' THEN 1 ELSE 0 END) as losses,
+                COALESCE(SUM(profit), 0) as profit
+            FROM bets
+            WHERE placed_at >= NOW() - INTERVAL '30 days'
+        """)
+    else:
+        c.execute("""
+            SELECT 
+                COUNT(*) as total_bets,
+                SUM(CASE WHEN result='won' THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN result='lost' THEN 1 ELSE 0 END) as losses,
+                COALESCE(SUM(profit), 0) as profit
+            FROM bets
+            WHERE placed_at >= datetime('now', '-30 days')
+        """)
+    row = c.fetchone()
+    if row:
+        d = dict(row)
+        wins = d.get("wins") or 0
+        losses = d.get("losses") or 0
+        resolved = wins + losses
+        summary["last_30d"] = {
+            "total_bets": d.get("total_bets") or 0,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": round((wins / resolved * 100) if resolved > 0 else 0, 1),
+            "profit": float(d.get("profit") or 0)
+        }
+    
+    # All time
+    c.execute("""
+        SELECT 
+            COUNT(*) as total_bets,
+            SUM(CASE WHEN result='won' THEN 1 ELSE 0 END) as wins,
+            SUM(CASE WHEN result='lost' THEN 1 ELSE 0 END) as losses,
+            COALESCE(SUM(profit), 0) as profit
+        FROM bets
+    """)
+    row = c.fetchone()
+    if row:
+        d = dict(row)
+        wins = d.get("wins") or 0
+        losses = d.get("losses") or 0
+        resolved = wins + losses
+        summary["all_time"] = {
+            "total_bets": d.get("total_bets") or 0,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": round((wins / resolved * 100) if resolved > 0 else 0, 1),
+            "profit": float(d.get("profit") or 0)
+        }
+    
+    return summary
+
+
 @app.get("/api/health")
 def api_health():
     """Simple health check endpoint"""

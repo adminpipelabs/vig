@@ -132,6 +132,50 @@ PROFESSIONAL_DASHBOARD_HTML = '''<!DOCTYPE html>
             </div>
         </div>
 
+        <!-- Performance Tracking (Last 7 Days) -->
+        <div class="bg-white rounded-lg border border-gray-200 mb-6">
+            <div class="px-5 py-4 border-b border-gray-200">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h3 class="text-sm font-semibold text-gray-900">Performance Tracking</h3>
+                        <p class="text-xs text-gray-500 mt-0.5">Last 7 days performance</p>
+                    </div>
+                    <div class="flex gap-4 text-xs">
+                        <div>
+                            <span class="text-gray-500">24h:</span>
+                            <span class="font-medium text-gray-900" id="stats24h">--</span>
+                        </div>
+                        <div>
+                            <span class="text-gray-500">7d:</span>
+                            <span class="font-medium text-gray-900" id="stats7d">--</span>
+                        </div>
+                        <div>
+                            <span class="text-gray-500">30d:</span>
+                            <span class="font-medium text-gray-900" id="stats30d">--</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase">Bets</th>
+                            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase">Wins</th>
+                            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase">Losses</th>
+                            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase">Win Rate</th>
+                            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase">Profit</th>
+                            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase">Deployed</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-gray-100" id="dailyStatsTable">
+                        <tr><td colspan="7" class="px-5 py-8 text-center text-sm text-gray-500">Loading daily stats...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
         <!-- Active Positions -->
         <div class="bg-white rounded-lg border border-gray-200 mb-6">
             <div class="px-5 py-4 border-b border-gray-200">
@@ -239,11 +283,13 @@ PROFESSIONAL_DASHBOARD_HTML = '''<!DOCTYPE html>
 
         async function refreshDashboard() {
             console.log('Refreshing dashboard...');
-            const [stats, balance, pending, botStatus] = await Promise.all([
+            const [stats, balance, pending, botStatus, dailyStats, historicalSummary] = await Promise.all([
                 fetchJSON('/api/stats'),
                 fetchJSON('/api/wallet/balance'),
                 fetchJSON('/api/pending'),
-                fetchJSON('/api/bot-status')
+                fetchJSON('/api/bot-status'),
+                fetchJSON('/api/daily-stats?days=7'),
+                fetchJSON('/api/historical-summary')
             ]);
 
             console.log('API Results:', { stats: !!stats, balance: !!balance, pending: !!pending, botStatus: !!botStatus });
@@ -309,6 +355,56 @@ PROFESSIONAL_DASHBOARD_HTML = '''<!DOCTYPE html>
             } else {
                 document.getElementById('nextScan').textContent = '--';
             }
+
+            // Update historical summary
+            if (historicalSummary) {
+                if (historicalSummary.last_24h) {
+                    const h24 = historicalSummary.last_24h;
+                    document.getElementById('stats24h').textContent = `${h24.total_bets} bets, ${h24.win_rate}% WR, ${formatCurrency(h24.profit)}`;
+                }
+                if (historicalSummary.last_7d) {
+                    const h7 = historicalSummary.last_7d;
+                    document.getElementById('stats7d').textContent = `${h7.total_bets} bets, ${h7.win_rate}% WR, ${formatCurrency(h7.profit)}`;
+                }
+                if (historicalSummary.last_30d) {
+                    const h30 = historicalSummary.last_30d;
+                    document.getElementById('stats30d').textContent = `${h30.total_bets} bets, ${h30.win_rate}% WR, ${formatCurrency(h30.profit)}`;
+                }
+            }
+
+            // Update daily stats table
+            if (dailyStats && dailyStats.daily_stats) {
+                updateDailyStatsTable(dailyStats.daily_stats);
+            }
+        }
+
+        function updateDailyStatsTable(dailyStats) {
+            const tbody = document.getElementById('dailyStatsTable');
+            if (!dailyStats || dailyStats.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" class="px-5 py-8 text-center text-sm text-gray-500">No data available</td></tr>';
+                return;
+            }
+
+            let html = '';
+            for (const day of dailyStats) {
+                const date = new Date(day.date);
+                const dateStr = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                const winRateClass = day.win_rate >= 80 ? 'text-success' : day.win_rate >= 70 ? 'text-warning' : 'text-danger';
+                const profitClass = day.profit >= 0 ? 'text-success' : 'text-danger';
+                
+                html += `
+                    <tr class="hover:bg-gray-50">
+                        <td class="px-5 py-3 text-sm font-medium text-gray-900">${dateStr}</td>
+                        <td class="px-5 py-3 text-sm text-gray-700">${day.total_bets}</td>
+                        <td class="px-5 py-3 text-sm text-success">${day.wins}</td>
+                        <td class="px-5 py-3 text-sm text-danger">${day.losses}</td>
+                        <td class="px-5 py-3 text-sm font-medium ${winRateClass}">${day.win_rate}%</td>
+                        <td class="px-5 py-3 text-sm font-medium ${profitClass}">${formatCurrency(day.profit)}</td>
+                        <td class="px-5 py-3 text-sm text-gray-700">${formatCurrency(day.deployed)}</td>
+                    </tr>
+                `;
+            }
+            tbody.innerHTML = html;
         }
 
         function updateWallets(balance, address) {
