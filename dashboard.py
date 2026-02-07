@@ -1103,7 +1103,624 @@ def api_scan():
 def pnl_page():
     """P&L Cash Flow page"""
     return """<!DOCTYPE html>
-<html><body><h1>P&L Flow</h1><p>Coming soon</p></body></html>"""
+<html><body><h1>P&L Flow</h1><p>Coming soon - will show detailed P&L flow</p></body></html>"""
+
+
+@app.get("/", response_class=HTMLResponse)
+def dashboard():
+    # Get wallet address from config
+    from config import Config
+    config = Config()
+    wallet_address = config.funder_address or "0x989B7F2308924eA72109367467B8F8e4d5ea5A1D"
+    
+    # Load professional template
+    try:
+        from dashboard_professional_template import PROFESSIONAL_DASHBOARD_HTML
+        html_template = PROFESSIONAL_DASHBOARD_HTML.replace("{{WALLET_ADDRESS}}", wallet_address)
+        return html_template
+    except ImportError:
+        # Fallback: return basic message if template not found
+        return f"""<!DOCTYPE html><html><body><h1>Dashboard Loading...</h1><p>Template not found. Wallet: {wallet_address}</p></body></html>"""
+
+
+@app.get("/pnl", response_class=HTMLResponse)
+def pnl_page():
+    """P&L Cash Flow Table Page"""
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>P&L Cash Flow — Vig Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0a0b0e; --surface: #12131a; --surface2: #1a1c25;
+  --border: #252833; --text: #e4e6ed; --text-dim: #6b7084;
+  --green: #00e676; --green-dim: rgba(0,230,118,0.12);
+  --red: #ff5252; --red-dim: rgba(255,82,82,0.12);
+  --amber: #ffd740; --amber-dim: rgba(255,215,64,0.12);
+  --blue: #448aff; --blue-dim: rgba(68,138,255,0.12);
+  --cyan: #18ffff; --cyan-dim: rgba(24,255,255,0.12);
+  --font-mono: 'JetBrains Mono', monospace;
+  --font-display: 'Space Grotesk', sans-serif;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:var(--bg); color:var(--text); font-family:var(--font-mono); font-size:13px; line-height:1.5; min-height:100vh; }
+.header { display:flex; align-items:center; justify-content:space-between; padding:16px 24px; border-bottom:1px solid var(--border); background:var(--surface); }
+.header-left { display:flex; align-items:center; gap:16px; }
+.logo { font-family:var(--font-display); font-size:22px; font-weight:700; letter-spacing:-0.5px; }
+.logo span { color:var(--green); }
+.logo a { color:inherit; text-decoration:none; }
+.nav-link { color:var(--text-dim); text-decoration:none; font-size:12px; padding:4px 12px; border-radius:4px; transition:all 0.2s; }
+.nav-link:hover { background:var(--surface2); color:var(--text); }
+.tabs { display:flex; gap:8px; margin-bottom:20px; border-bottom:1px solid var(--border); }
+.tab { padding:10px 20px; font-size:12px; font-weight:500; color:var(--text-dim); cursor:pointer; border-bottom:2px solid transparent; transition:all 0.2s; text-transform:uppercase; letter-spacing:0.5px; }
+.tab:hover { color:var(--text); }
+.tab.active { color:var(--cyan); border-bottom-color:var(--cyan); }
+.tab-content { display:none; }
+.tab-content.active { display:block; }
+.status-badge { display:inline-flex; align-items:center; gap:6px; padding:4px 12px; border-radius:20px; font-size:11px; font-weight:500; text-transform:uppercase; letter-spacing:0.5px; }
+.status-badge.paper { background:var(--amber-dim); color:var(--amber); }
+.status-badge.live { background:var(--green-dim); color:var(--green); }
+.status-badge.offline { background:var(--red-dim); color:var(--red); }
+.status-badge.error { background:var(--red-dim); color:var(--red); }
+.status-dot { width:6px; height:6px; border-radius:50%; background:currentColor; animation:pulse 2s ease-in-out infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+.bot-status-info { padding:12px 0; }
+.bot-activity, .bot-last-scan, .bot-last-window { margin-bottom:8px; font-size:12px; }
+.bot-activity strong, .bot-last-scan strong, .bot-last-window strong { color:var(--text-dim); margin-right:8px; }
+.bot-note { margin-top:12px; padding-top:12px; border-top:1px solid var(--border); font-size:11px; color:var(--text-dim); line-height:1.5; }
+.card-actions { display:flex; align-items:center; gap:8px; }
+.header-right { display:flex; align-items:center; gap:16px; }
+.refresh-label { color:var(--text-dim); font-size:11px; }
+.countdown { font-size:12px; color:var(--cyan); font-weight:500; }
+.container { padding:20px 24px; max-width:1440px; margin:0 auto; }
+.grid { display:grid; gap:16px; margin-bottom:16px; }
+.grid-4 { grid-template-columns:repeat(4,1fr); }
+.grid-3 { grid-template-columns:repeat(3,1fr); }
+.grid-2 { grid-template-columns:1fr 1fr; }
+.card { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:16px 20px; }
+.card-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
+.card-title { font-size:11px; text-transform:uppercase; letter-spacing:1px; color:var(--text-dim); font-weight:500; }
+.card-value { font-family:var(--font-display); font-size:28px; font-weight:700; letter-spacing:-1px; }
+.card-sub { font-size:11px; color:var(--text-dim); margin-top:4px; }
+.positive { color:var(--green); }
+.negative { color:var(--red); }
+.neutral { color:var(--text-dim); }
+.snowball-track { width:100%; height:8px; background:var(--surface2); border-radius:4px; margin:12px 0 8px; overflow:hidden; }
+.snowball-fill { height:100%; border-radius:4px; transition:width 0.6s ease; }
+.snowball-fill.growth { background:linear-gradient(90deg,var(--blue),var(--green)); }
+.snowball-fill.harvest { background:linear-gradient(90deg,var(--green),var(--amber)); }
+.snowball-labels { display:flex; justify-content:space-between; font-size:11px; color:var(--text-dim); }
+.table-wrap { overflow-x:auto; max-height:400px; overflow-y:auto; }
+table { width:100%; border-collapse:collapse; font-size:12px; }
+th { text-align:left; padding:8px 12px; font-size:10px; text-transform:uppercase; letter-spacing:0.8px; color:var(--text-dim); font-weight:500; border-bottom:1px solid var(--border); white-space:nowrap; position:sticky; top:0; background:var(--surface); }
+td { padding:8px 12px; border-bottom:1px solid var(--border); white-space:nowrap; }
+tr:hover td { background:rgba(255,255,255,0.02); }
+.tag { display:inline-block; padding:2px 8px; border-radius:4px; font-size:10px; font-weight:600; text-transform:uppercase; }
+.tag.won { background:var(--green-dim); color:var(--green); }
+.tag.lost { background:var(--red-dim); color:var(--red); }
+.tag.pending { background:var(--blue-dim); color:var(--blue); }
+.tag.growth { background:var(--blue-dim); color:var(--blue); }
+.tag.harvest { background:var(--amber-dim); color:var(--amber); }
+.tag.yes { background:var(--green-dim); color:var(--green); }
+.tag.no { background:var(--red-dim); color:var(--red); }
+.tag.qual { background:var(--green-dim); color:var(--green); }
+.tag.skip { background:var(--surface2); color:var(--text-dim); }
+.chart-container { width:100%; height:200px; position:relative; }
+canvas { width:100%!important; height:100%!important; }
+.cb-status { display:flex; align-items:center; gap:8px; padding:10px 14px; border-radius:6px; font-size:12px; font-weight:500; }
+.cb-ok { background:var(--green-dim); color:var(--green); }
+.cb-warn { background:var(--amber-dim); color:var(--amber); }
+.cb-stop { background:var(--red-dim); color:var(--red); }
+.empty { text-align:center; padding:40px; color:var(--text-dim); }
+.empty-icon { font-size:32px; margin-bottom:8px; opacity:0.4; }
+.btn { display:inline-flex; align-items:center; gap:6px; padding:6px 14px; border-radius:6px; font-size:11px; font-weight:600; font-family:var(--font-mono); cursor:pointer; border:1px solid var(--border); background:var(--surface2); color:var(--text); transition:all 0.15s; text-transform:uppercase; letter-spacing:0.5px; }
+.btn:hover { background:var(--border); border-color:var(--text-dim); }
+.btn.scanning { opacity:0.6; cursor:wait; }
+.btn-cyan { border-color:rgba(24,255,255,0.3); color:var(--cyan); }
+.btn-cyan:hover { background:var(--cyan-dim); }
+.scan-summary { display:flex; gap:16px; margin-bottom:12px; flex-wrap:wrap; }
+.scan-stat { font-size:12px; }
+.scan-stat b { color:var(--cyan); }
+.scan-note { font-size:11px; color:var(--text-dim); margin-top:8px; }
+@media (max-width:900px) { .grid-4{grid-template-columns:repeat(2,1fr);} .grid-3{grid-template-columns:1fr;} .grid-2{grid-template-columns:1fr;} .container{padding:12px;} }
+@media (max-width:500px) { .grid-4{grid-template-columns:1fr;} }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="header-left">
+    <div class="logo"><a href="/" style="color:inherit;text-decoration:none;">V<span>ig</span></a></div>
+    <div class="status-badge offline" id="statusBadge"><div class="status-dot"></div><span id="statusText">Loading...</span></div>
+  </div>
+  <div class="header-right">
+    <span class="countdown" id="countdown"></span>
+    <span class="refresh-label" id="lastUpdate"></span>
+  </div>
+</div>
+<div class="container">
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('overview')">Overview</div>
+    <div class="tab" onclick="switchTab('pnl')">P&L Flow</div>
+  </div>
+
+  <!-- Overview Tab -->
+  <div id="overviewTab" class="tab-content active">
+  <!-- Balance Overview -->
+  <div class="card" style="margin-bottom:16px">
+    <div class="card-header"><div class="card-title">Portfolio Balance</div></div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-top:12px">
+      <div><div class="card-sub">Available Cash</div><div class="card-value" id="currentCash">--</div></div>
+      <div><div class="card-sub">Locked Funds</div><div class="card-value" id="lockedFunds">--</div></div>
+      <div><div class="card-sub">Total Balance</div><div class="card-value" id="totalBalance">--</div></div>
+      <div><div class="card-sub">Position Value</div><div class="card-value" id="positionValue">--</div></div>
+      <div><div class="card-sub">Total Portfolio</div><div class="card-value" id="totalPortfolio">--</div></div>
+      <div><div class="card-sub">Net P&L</div><div class="card-value" id="netPnl">--</div></div>
+    </div>
+  </div>
+
+  <!-- Stats Row -->
+  <div class="grid grid-4">
+    <div class="card"><div class="card-title">Realized P&L</div><div class="card-value" id="totalPnl">--</div><div class="card-sub" id="totalPnlSub"></div></div>
+    <div class="card"><div class="card-title">Win Rate</div><div class="card-value" id="winRate">--</div><div class="card-sub" id="winRateSub"></div></div>
+    <div class="card"><div class="card-title">Total Pocketed</div><div class="card-value positive" id="pocketed">--</div><div class="card-sub" id="pocketedSub"></div></div>
+    <div class="card"><div class="card-title">Windows</div><div class="card-value" id="totalWindows">--</div><div class="card-sub" id="windowsSub"></div></div>
+  </div>
+
+  <!-- Snowball + Circuit Breaker -->
+  <div class="grid grid-2">
+    <div class="card">
+      <div class="card-header"><div class="card-title">Snowball</div><span class="tag" id="phaseBadge">--</span></div>
+      <div class="card-value" id="clipSize">--</div><div class="card-sub">per bet</div>
+      <div class="snowball-track"><div class="snowball-fill growth" id="snowballFill" style="width:10%"></div></div>
+      <div class="snowball-labels"><span>$10</span><span id="snowballPct">0%</span><span>$100</span></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title">Circuit Breaker</div></div>
+      <div class="cb-status cb-ok" id="cbStatus"><span>&#9679;</span><span id="cbText">All clear</span></div>
+      <div style="margin-top:12px;display:flex;gap:16px;">
+        <div><div class="card-title" style="margin-bottom:4px">Consec. Losses</div><div style="font-size:18px;font-weight:600" id="consecLosses">0</div><div class="card-sub">limit: 5</div></div>
+        <div><div class="card-title" style="margin-bottom:4px">Daily Loss</div><div style="font-size:18px;font-weight:600" id="dailyLoss">0%</div><div class="card-sub">limit: 15%</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Active Bets -->
+  <div class="card" style="margin-bottom:16px" id="pendingCard" hidden>
+    <div class="card-header">
+      <div class="card-title">Active Bets</div>
+      <span class="tag pending" id="pendingCount">0</span>
+    </div>
+    <div class="table-wrap" id="pendingTable"></div>
+  </div>
+
+  <!-- Bot Control Panel -->
+  <div class="card" style="margin-bottom:16px">
+    <div class="card-header">
+      <div class="card-title">Bot Control</div>
+      <div class="card-actions">
+        <span class="status-badge" id="botStatusBadge">--</span>
+      </div>
+    </div>
+    <div id="botStatusContent">
+      <div class="empty">Loading bot status...</div>
+    </div>
+    <div id="botControlPanel" style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);display:none;">
+      <div class="bot-description" style="margin-bottom:16px;padding:12px;background:var(--surface2);border-radius:6px;font-size:12px;line-height:1.6;color:var(--text-dim);">
+        <strong style="color:var(--text);display:block;margin-bottom:8px;">About This Bot</strong>
+        <p style="margin:0 0 8px 0;">This bot automatically scans <strong>Polymarket</strong> every hour for expiring prediction markets. It identifies markets with favorable odds (70-90% favorite) and places bets using a snowball strategy that increases bet size after wins.</p>
+        <p style="margin:0;"><strong>Trading Windows:</strong> Every 60 minutes | <strong>Markets:</strong> Polymarket (future: additional exchanges) | <strong>Strategy:</strong> Snowball with circuit breakers</p>
+      </div>
+      <div class="bot-controls" style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn btn-cyan" id="restartBtn" onclick="confirmRestart()" style="flex:1;min-width:120px;">🔄 Restart</button>
+        <button class="btn" id="stopBtn" onclick="controlBot('stop')" style="flex:1;min-width:120px;border-color:var(--red-dim);color:var(--red);">⏹ Stop</button>
+        <button class="btn" id="startBtn" onclick="controlBot('start')" style="flex:1;min-width:120px;border-color:var(--green-dim);color:var(--green);">▶ Start</button>
+      </div>
+      <div id="botControlMessage" style="margin-top:12px;padding:8px 12px;border-radius:6px;font-size:11px;display:none;"></div>
+    </div>
+  </div>
+
+  <!-- Live Scanner -->
+  <div class="card" style="margin-bottom:16px">
+    <div class="card-header">
+      <div class="card-title">Live Scanner</div>
+      <button class="btn btn-cyan" id="scanBtn" onclick="runScan()">Scan Now</button>
+    </div>
+    <div id="scanResults">
+      <div class="empty"><div class="empty-icon">&#9673;</div><div>Hit "Scan Now" to scan Polymarket for expiring markets (future: additional prediction exchanges)</div></div>
+    </div>
+  </div>
+
+  <!-- Equity Curve -->
+  <div class="card" style="margin-bottom:16px"><div class="card-header"><div class="card-title">Equity Curve</div></div><div class="chart-container"><canvas id="equityChart"></canvas></div></div>
+
+  <!-- Windows + Bets Tables -->
+  <div class="grid grid-2">
+    <div class="card"><div class="card-header"><div class="card-title">Trading Windows</div></div><div class="table-wrap" id="windowsTable"><div class="empty"><div class="empty-icon">&#9678;</div><div>No windows yet</div></div></div></div>
+    <div class="card"><div class="card-header"><div class="card-title">All Bets</div></div><div class="table-wrap" id="betsTable"><div class="empty"><div class="empty-icon">&#9678;</div><div>No bets yet</div></div></div></div>
+  </div>
+  </div>
+
+  <!-- P&L Flow Tab -->
+  <div id="pnlTab" class="tab-content">
+    <div class="grid grid-3" style="margin-bottom:20px">
+      <div class="card"><div class="card-title">Starting Balance</div><div class="card-value" id="pnlStartBalance">--</div></div>
+      <div class="card"><div class="card-title">Current Balance</div><div class="card-value" id="pnlCurrentBalance">--</div></div>
+      <div class="card"><div class="card-title">Net P&L</div><div class="card-value" id="pnlNetPnl">--</div></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title">Cash Flow</div></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Type</th>
+              <th>Market</th>
+              <th>Side</th>
+              <th>Amount</th>
+              <th>Payout</th>
+              <th>Profit</th>
+              <th>Balance</th>
+            </tr>
+          </thead>
+          <tbody id="pnlFlowTable">
+            <tr><td colspan="8" class="empty">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+let equityChart=null;
+
+function switchTab(tabName) {
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
+  event.target.classList.add('active');
+  document.getElementById(tabName+'Tab').classList.add('active');
+  if(tabName==='pnl') loadPnlFlow();
+}
+
+async function loadPnlFlow() {
+  try {
+    const data=await fetchJSON('/api/pnl-flow');
+    if(!data || !data.flow) {
+      document.getElementById('pnlFlowTable').innerHTML='<tr><td colspan="8" class="empty">No data available</td></tr>';
+      return;
+    }
+    
+    document.getElementById('pnlStartBalance').textContent=fmt(data.starting_balance);
+    // Show total portfolio (cash + positions) not just cash balance
+    const totalPortfolio=(data.total_portfolio||0)||((data.current_cash||0)+(data.position_value||0));
+    document.getElementById('pnlCurrentBalance').textContent=fmt(totalPortfolio);
+    // Net P&L = total portfolio - starting balance
+    const netPnl=data.net_pnl_total!==undefined?data.net_pnl_total:(totalPortfolio-data.starting_balance);
+    const pnlEl=document.getElementById('pnlNetPnl');
+    pnlEl.textContent=fmt(netPnl);
+    pnlEl.className='card-value '+(netPnl>=0?'positive':'negative');
+    
+    let html='';
+    if(!data.flow || data.flow.length===0) {
+      html='<tr><td colspan="8" class="empty">No transactions yet</td></tr>';
+    } else {
+      for(const f of data.flow) {
+      const date=f.date?new Date(f.date).toLocaleString():'--';
+      let type='',amount='',payout='',profit='',balance='',side='';
+      
+      if(f.type==='starting_balance') {
+        type='<span class="tag growth">START</span>';
+        balance='<span class="positive">'+fmt(f.balance)+'</span>';
+      } else if(f.type==='bet_placed') {
+        type='<span class="tag pending">BET</span>';
+        amount='<span class="negative">-'+fmt(f.amount)+'</span>';
+        balance=fmt(f.balance);
+        side=f.side||'--';
+      } else if(f.type==='settlement') {
+        type='<span class="tag '+(f.result==='won'?'won':'lost')+'">SETTLE</span>';
+        payout='<span class="positive">+'+fmt(f.payout)+'</span>';
+        profit='<span class="'+(f.profit>=0?'positive':'negative')+'">'+fmt(f.profit)+'</span>';
+        balance='<span class="'+(f.balance>=0?'positive':'negative')+'">'+fmt(f.balance)+'</span>';
+        side=f.side||'--';
+      }
+      
+      const market=(f.market||'').substring(0,35)+((f.market||'').length>35?'...':'');
+      html+='<tr>';
+      html+='<td>'+date+'</td>';
+      html+='<td>'+type+'</td>';
+      html+='<td title="'+(f.market||'')+'">'+market+'</td>';
+      html+='<td>'+side+'</td>';
+      html+='<td>'+amount+'</td>';
+      html+='<td>'+payout+'</td>';
+      html+='<td>'+profit+'</td>';
+      html+='<td>'+balance+'</td>';
+      html+='</tr>';
+      }
+    }
+    document.getElementById('pnlFlowTable').innerHTML=html;
+  } catch(e) {
+    document.getElementById('pnlFlowTable').innerHTML='<tr><td colspan="8" class="empty">Error: '+e.message+'</td></tr>';
+  }
+}
+let lastWindowAt=null;
+
+async function fetchJSON(u){try{const r=await fetch(u);if(!r.ok){console.error(`API error ${r.status}: ${u}`);return null;}return await r.json()}catch(e){console.error(`Fetch error for ${u}:`,e);return null}}
+function fmt(n){if(n==null)return'--';const sign=n>=0?'+':'-';return sign+'$'+Math.abs(n).toFixed(2)}
+function timeAgo(iso){if(!iso)return'--';const d=new Date(iso),s=(Date.now()-d.getTime())/1000;if(s<60)return Math.floor(s)+'s ago';if(s<3600){const m=Math.floor(s/60);return m+'m ago';}if(s<172800){const h=Math.floor(s/3600),m=Math.floor((s%3600)/60);if(m===0)return h+'h ago';return h+'h '+m+'m ago';}return Math.floor(s/86400)+'d ago'}
+function formatDateTime(iso){if(!iso)return'--';const d=new Date(iso);const months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];const month=months[d.getMonth()];const day=d.getDate();const year=d.getFullYear();let hours=d.getHours();const minutes=d.getMinutes();const ampm=hours>=12?'PM':'AM';hours=hours%12;hours=hours?hours:12;const mins=minutes<10?'0'+minutes:minutes;return month+' '+day+', '+year+', '+hours+':'+mins+' '+ampm}
+
+// Countdown timer
+function updateCountdown(){
+  const el=document.getElementById('countdown');
+  if(!lastWindowAt){el.textContent='';return}
+  const next=new Date(lastWindowAt).getTime()+3600000;
+  const diff=next-Date.now();
+  if(diff<=0){el.textContent='Window due now';return}
+  const m=Math.floor(diff/60000);
+  const s=Math.floor((diff%60000)/1000);
+  el.textContent='Next window: '+m+'m '+s+'s';
+}
+setInterval(updateCountdown,1000);
+
+// Live scan
+async function runScan(){
+  const btn=document.getElementById('scanBtn');
+  btn.textContent='Scanning...';btn.classList.add('scanning');
+  const data=await fetchJSON('/api/scan');
+  btn.textContent='Scan Now';btn.classList.remove('scanning');
+
+  const el=document.getElementById('scanResults');
+  if(!data||data.error){
+    el.innerHTML='<div class="empty">Scan failed: '+(data?.error||'unknown')+'</div>';
+    return;
+  }
+
+  let html='<div class="scan-summary">';
+  html+='<div class="scan-stat">Raw markets: <b>'+data.total_raw+'</b></div>';
+  html+='<div class="scan-stat">In price range: <b>'+data.total_parsed+'</b></div>';
+  html+='<div class="scan-stat">Qualifying: <b>'+data.qualifying+'</b></div>';
+  html+='</div>';
+
+  if(data.markets.length===0){
+    html+='<div class="empty">No markets expiring in the next 60 minutes</div>';
+  } else {
+    html+='<table><tr><th>Market</th><th>Cat</th><th>Exp</th><th>YES</th><th>NO</th><th>Fav</th><th>Vol</th><th>Status</th></tr>';
+    for(const m of data.markets){
+      const q=m.question.substring(0,45)+(m.question.length>45?'...':'');
+      html+='<tr><td title="'+m.question+'">'+q+'</td>';
+      html+='<td>'+m.category+'</td>';
+      html+='<td>'+m.minutes_to_expiry+'m</td>';
+      html+='<td'+(m.fav_side==='YES'?' class="positive"':'')+'>$'+m.yes_price.toFixed(2)+'</td>';
+      html+='<td'+(m.fav_side==='NO'?' class="positive"':'')+'>$'+m.no_price.toFixed(2)+'</td>';
+      html+='<td>'+(m.fav_side?'<span class="tag '+(m.fav_side==='YES'?'yes':'no')+'">'+m.fav_side+'</span>':'--')+'</td>';
+      html+='<td>$'+(m.volume||0).toLocaleString()+'</td>';
+      html+='<td><span class="tag '+(m.qualifies?'qual':'skip')+'">'+(m.qualifies?'QUAL':'SKIP')+'</span></td>';
+      html+='</tr>';
+    }
+    html+='</table>';
+    html+='<div class="scan-note">Scanned Polymarket at '+new Date(data.scanned_at).toLocaleTimeString()+' | Window ends '+new Date(data.window_end).toLocaleTimeString()+'</div>';
+  }
+  el.innerHTML=html;
+}
+
+async function refresh(){
+  try{
+    const[stats,windows,bets,curve,pending,botStatus]=await Promise.all([
+      fetchJSON('/api/stats').catch(e=>{console.error('Stats error:',e);return null;}),
+      fetchJSON('/api/windows?limit=20').catch(e=>{console.error('Windows error:',e);return null;}),
+      fetchJSON('/api/bets?limit=30').catch(e=>{console.error('Bets error:',e);return null;}),
+      fetchJSON('/api/equity-curve').catch(e=>{console.error('Curve error:',e);return null;}),
+      fetchJSON('/api/pending').catch(e=>{console.error('Pending error:',e);return null;}),
+      fetchJSON('/api/bot-status').catch(e=>{console.error('Bot status error:',e);return null;}),
+    ]);
+    
+    // Update bot status
+    updateBotStatus(botStatus);
+
+  // Status
+  const b=document.getElementById('statusBadge'),st=document.getElementById('statusText');
+  if(!stats||stats.total_bets===0){b.className='status-badge offline';st.textContent='No data'}
+  else if(stats.mode==='paper'){b.className='status-badge paper';st.textContent='Paper'}
+  else{b.className='status-badge live';st.textContent='Live'}
+
+  // Countdown
+  if(stats&&stats.last_window_at) lastWindowAt=stats.last_window_at;
+
+  if(stats){
+  // Portfolio balance
+  const currentCash=stats.current_cash||0;
+  const lockedFunds=stats.pending_locked||0;
+  const positionValue=stats.position_value||0;
+  const totalPortfolio=stats.total_portfolio||0;
+  const netPnl=stats.net_pnl||0;
+  document.getElementById('currentCash').textContent=fmt(currentCash);
+  document.getElementById('lockedFunds').textContent=fmt(lockedFunds);
+  document.getElementById('positionValue').textContent=fmt(positionValue);
+  document.getElementById('totalPortfolio').textContent=fmt(totalPortfolio);
+  const netPnlEl=document.getElementById('netPnl');
+  netPnlEl.textContent=fmt(netPnl);
+  netPnlEl.className='card-value '+(netPnl>=0?'positive':'negative');
+  
+  // Realized P&L (settled bets only)
+  const pnl=stats.total_profit||0;
+  document.getElementById('totalPnl').textContent=fmt(pnl);
+  document.getElementById('totalPnl').className='card-value '+(pnl>=0?'positive':'negative');
+  document.getElementById('totalPnlSub').textContent=(stats.total_bets||0)+' bets | $'+(stats.total_deployed||0).toFixed(0)+' deployed';
+    document.getElementById('winRate').textContent=(stats.win_rate||0).toFixed(1)+'%';
+    document.getElementById('winRate').className='card-value '+(stats.win_rate>=85?'positive':stats.win_rate>=80?'neutral':'negative');
+    document.getElementById('winRateSub').textContent=(stats.wins||0)+'W '+(stats.losses||0)+'L '+(stats.pending||0)+'P';
+    document.getElementById('pocketed').textContent='$'+(stats.total_pocketed||0).toFixed(2);
+    document.getElementById('pocketedSub').textContent=(stats.current_phase||'growth')+' mode';
+    document.getElementById('totalWindows').textContent=stats.total_windows||0;
+    document.getElementById('windowsSub').textContent='clip: $'+(stats.current_clip||10).toFixed(2);
+    const clip=stats.current_clip||10,pct=Math.min(100,((clip-10)/90)*100);
+    document.getElementById('clipSize').textContent='$'+clip.toFixed(2);
+    const fill=document.getElementById('snowballFill');
+    fill.style.width=Math.max(3,pct)+'%';fill.className='snowball-fill '+(stats.current_phase||'growth');
+    document.getElementById('snowballPct').textContent=pct.toFixed(0)+'%';
+    const pb=document.getElementById('phaseBadge');pb.textContent=stats.current_phase||'growth';pb.className='tag '+(stats.current_phase||'growth');
+    const consec=stats.consecutive_losses||0;document.getElementById('consecLosses').textContent=consec;
+    const cb=document.getElementById('cbStatus'),ct=document.getElementById('cbText');
+    if(consec>=5){cb.className='cb-status cb-stop';ct.textContent='STOPPED'}
+    else if(consec>=3){cb.className='cb-status cb-warn';ct.textContent='Warning'}
+    else{cb.className='cb-status cb-ok';ct.textContent='All clear'}
+  }
+
+  // Pending bets
+  const pendingCard=document.getElementById('pendingCard');
+  if(pending&&pending.length>0){
+    pendingCard.hidden=false;
+    document.getElementById('pendingCount').textContent=pending.length+' active';
+    let ph='<table><tr><th>Market</th><th>Side</th><th>Price</th><th>Amount</th><th>Placed</th></tr>';
+    for(const p of pending){
+      const q=(p.market_question||'').substring(0,45)+((p.market_question||'').length>45?'...':'');
+      ph+='<tr><td title="'+(p.market_question||'')+'">'+q+'</td>';
+      ph+='<td><span class="tag '+(p.side==='YES'?'yes':'no')+'">'+p.side+'</span></td>';
+      ph+='<td>$'+(p.price||0).toFixed(2)+'</td>';
+      ph+='<td>$'+(p.amount||0).toFixed(2)+'</td>';
+      ph+='<td>'+formatDateTime(p.placed_at)+'</td></tr>';
+    }
+    ph+='</table>';
+    document.getElementById('pendingTable').innerHTML=ph;
+  } else {
+    pendingCard.hidden=true;
+  }
+
+  // Windows table
+  if(windows&&windows.length>0){
+    let h='<table><tr><th>#</th><th>Time</th><th>Bets</th><th>W/L</th><th>Profit</th><th>Clip</th><th>Phase</th></tr>';
+    for(const w of windows){const p=w.profit||0;h+='<tr><td>'+w.id+'</td><td>'+timeAgo(w.started_at)+'</td><td>'+(w.bets_placed||0)+'</td><td>'+(w.bets_won||0)+'W '+(w.bets_lost||0)+'L</td><td class="'+(p>=0?'positive':'negative')+'">'+fmt(p)+'</td><td>$'+(w.clip_size||0).toFixed(2)+'</td><td><span class="tag '+(w.phase||'growth')+'">'+(w.phase||'--')+'</span></td></tr>'}
+    h+='</table>';document.getElementById('windowsTable').innerHTML=h}
+
+  // Bets table
+  if(bets&&bets.length>0){
+    let h='<table><tr><th>Market</th><th>Side</th><th>Price</th><th>Amt</th><th>Result</th><th>P&L</th></tr>';
+    for(const b of bets){const q=(b.market_question||'').substring(0,40)+((b.market_question||'').length>40?'...':'');const pr=b.profit||0;h+='<tr><td title="'+(b.market_question||'')+'">'+q+'</td><td>'+(b.side||'--')+'</td><td>$'+(b.price||0).toFixed(2)+'</td><td>$'+(b.amount||0).toFixed(2)+'</td><td><span class="tag '+(b.result||'pending')+'">'+(b.result||'pending')+'</span></td><td class="'+(b.result==='won'?'positive':b.result==='lost'?'negative':'neutral')+'">'+(b.result==='pending'?'--':fmt(pr))+'</td></tr>'}
+    h+='</table>';document.getElementById('betsTable').innerHTML=h}
+
+  // Equity chart
+  if(curve&&curve.length>0){
+    if(equityChart)equityChart.destroy();
+    const ctx=document.getElementById('equityChart').getContext('2d');
+    const d=curve.map(c=>c.cumulative);
+    equityChart=new Chart(ctx,{type:'line',data:{labels:curve.map(c=>'W'+c.window),datasets:[{data:d,borderColor:d[d.length-1]>=0?'#00e676':'#ff5252',backgroundColor:d[d.length-1]>=0?'rgba(0,230,118,0.08)':'rgba(255,82,82,0.08)',fill:true,tension:0.3,pointRadius:2,borderWidth:2}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#6b7084',font:{size:10}},grid:{color:'rgba(255,255,255,0.04)'}},y:{ticks:{color:'#6b7084',font:{size:10},callback:v=>'$'+v},grid:{color:'rgba(255,255,255,0.04)'}}},interaction:{intersect:false,mode:'index'}}})
+  }
+  document.getElementById('lastUpdate').textContent='Updated '+new Date().toLocaleTimeString();
+}
+
+function updateBotStatus(status){
+  if(!status)return;
+  const badge=document.getElementById('botStatusBadge');
+  const content=document.getElementById('botStatusContent');
+  const panel=document.getElementById('botControlPanel');
+  
+  const statusMap={
+    'running':{class:'status-badge live',text:'Running',icon:'🟢'},
+    'stopped':{class:'status-badge offline',text:'Stopped',icon:'🔴'},
+    'error':{class:'status-badge error',text:'Error',icon:'🟡'},
+    'unknown':{class:'status-badge offline',text:'Unknown',icon:'⚪'}
+  };
+  
+  const s=statusMap[status.status]||statusMap['unknown'];
+  badge.className=s.class;
+  badge.textContent=s.icon+' '+s.text;
+  
+  // Show control panel
+  panel.style.display='block';
+  
+  // Update button states
+  const restartBtn=document.getElementById('restartBtn');
+  const stopBtn=document.getElementById('stopBtn');
+  const startBtn=document.getElementById('startBtn');
+  
+  if(status.status==='running'){
+    restartBtn.disabled=false;
+    stopBtn.disabled=false;
+    startBtn.disabled=true;
+    startBtn.style.opacity='0.5';
+    stopBtn.style.opacity='1';
+  } else {
+    restartBtn.disabled=false;
+    stopBtn.disabled=true;
+    startBtn.disabled=false;
+    stopBtn.style.opacity='0.5';
+    startBtn.style.opacity='1';
+  }
+  
+  let html='<div class="bot-status-info">';
+  html+='<div class="bot-activity"><strong>Activity:</strong> '+(status.activity||'Unknown')+'</div>';
+  if(status.last_scan){
+    html+='<div class="bot-last-scan"><strong>Last Scan:</strong> '+timeAgo(status.last_scan)+'</div>';
+  }
+  if(status.last_window){
+    html+='<div class="bot-last-window"><strong>Last Window:</strong> '+timeAgo(status.last_window)+'</div>';
+  } else {
+    html+='<div class="bot-last-window"><strong>Last Window:</strong> <span style="color:var(--text-dim)">No windows recorded yet</span></div>';
+  }
+  html+='</div>';
+  content.innerHTML=html;
+}
+
+function confirmRestart(){
+  if(confirm('Are you sure you want to restart the bot?\n\nThis will restart the Railway service and may interrupt any active trading windows.')){
+    controlBot('restart');
+  }
+}
+
+async function controlBot(action){
+  const btn=event.target;
+  const originalText=btn.textContent;
+  btn.disabled=true;
+  btn.textContent='Processing...';
+  
+  const messageEl=document.getElementById('botControlMessage');
+  messageEl.style.display='none';
+  
+  try{
+    const formData=new FormData();
+    formData.append('action',action);
+    
+    const response=await fetch('/api/bot-control',{
+      method:'POST',
+      body:formData
+    });
+    const result=await response.json();
+    
+    // Format message with line breaks
+    const message=result.message||'Action completed';
+    messageEl.innerHTML=message.replace(/\n/g,'<br>');
+    messageEl.style.display='block';
+    messageEl.style.background=result.status==='success'?'var(--green-dim)':result.status==='error'?'var(--red-dim)':'var(--amber-dim)';
+    messageEl.style.color=result.status==='success'?'var(--green)':result.status==='error'?'var(--red)':'var(--amber)';
+    
+    if(action==='restart'&&result.status==='success'){
+      // Refresh status after a delay
+      setTimeout(()=>{
+        location.reload();
+      },5000);
+    }
+  }catch(e){
+    messageEl.innerHTML='Error: '+e.message;
+    messageEl.style.display='block';
+    messageEl.style.background='var(--red-dim)';
+    messageEl.style.color='var(--red)';
+  }finally{
+    btn.disabled=false;
+    btn.textContent=originalText;
+  }
+}
+
+refresh();setInterval(refresh,15000);
+</script>
+</body>
+</html>"""
 
 
 if __name__ == "__main__":
