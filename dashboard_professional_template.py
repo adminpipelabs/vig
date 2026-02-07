@@ -224,11 +224,12 @@ PROFESSIONAL_DASHBOARD_HTML = '''<!DOCTYPE html>
         async function refreshDashboard() {
             console.log('Refreshing dashboard...');
             // Only fetch essential data that changes frequently
-            const [stats, balance, pending, botStatus] = await Promise.all([
+            const [stats, balance, pending, botStatus, bets] = await Promise.all([
                 fetchJSON('/api/stats'),
                 fetchJSON('/api/wallet/balance'),
                 fetchJSON('/api/pending'),
-                fetchJSON('/api/bot-status')
+                fetchJSON('/api/bot-status'),
+                fetchJSON('/api/bets?limit=10')
             ]);
 
             console.log('API Results:', { stats: !!stats, balance: !!balance, pending: !!pending, botStatus: !!botStatus });
@@ -272,6 +273,13 @@ PROFESSIONAL_DASHBOARD_HTML = '''<!DOCTYPE html>
                 document.getElementById('activePositions').textContent = '0';
                 document.getElementById('activePositionsCount').textContent = '0 open positions';
                 document.getElementById('activePositionsTable').innerHTML = '<tr><td colspan="5" class="px-5 py-8 text-center text-sm text-gray-500">No active positions</td></tr>';
+            }
+
+            // Update recent activity
+            if (bets && bets.length > 0) {
+                updateRecentActivity(bets);
+            } else {
+                document.getElementById('activityFeed').innerHTML = '<div class="px-5 py-8 text-center text-sm text-gray-500">No recent activity</div>';
             }
 
             // Update bot status
