@@ -276,6 +276,18 @@ def main():
 
             logger.info(f"Results: {wins}W {losses}L | Profit: ${window_profit:.2f}")
             db.update_bot_status("main", "idle", f"Window {window_id} complete: {wins}W {losses}L")
+            
+            # Check if there are winnings to redeem (non-blocking, just log)
+            if wins > 0 and not config.paper_mode:
+                try:
+                    won_bets = db.conn.execute(
+                        "SELECT COUNT(*) FROM bets WHERE paper=? AND result='won' AND condition_id IS NOT NULL AND condition_id != ''",
+                        (0 if not config.paper_mode else 1,)
+                    ).fetchone()[0]
+                    if won_bets > 0:
+                        logger.info(f"💰 {won_bets} winning bet(s) ready for redemption. Auto-redemption runs every 2 hours via cron.")
+                except Exception as e:
+                    logger.debug(f"Could not check redemption status: {e}")
 
             # 7. Snowball
             sb_result = snowball.process_window(window_profit, len(bets))

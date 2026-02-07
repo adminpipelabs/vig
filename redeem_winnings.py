@@ -7,19 +7,39 @@ IMPORTANT: Check Polymarket.com first to see if manual redemption is available.
 If you see "Redeem" buttons, use those instead - they're safer.
 """
 import os
-import sqlite3
+import sys
 from web3 import Web3
 from pathlib import Path
 from dotenv import load_dotenv
 
-env_path = Path('/Users/mikaelo/vig/.env')
-if env_path.exists():
-    load_dotenv(dotenv_path=env_path)
+# Load .env from script directory or parent directory
+script_dir = Path(__file__).parent.absolute()
+env_paths = [
+    script_dir / '.env',
+    script_dir.parent / '.env',
+    Path('/root/vig/.env'),  # Server path
+    Path.home() / 'vig' / '.env',  # Local dev path
+]
+
+for env_path in env_paths:
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path)
+        break
 
 # Config
 ALCHEMY_RPC = "https://polygon-mainnet.g.alchemy.com/v2/7LOy-ke3YzoCRr1qimCRm"
 PRIVATE_KEY = os.getenv("POLYGON_PRIVATE_KEY")
-DB_PATH = "vig.db"
+
+# Database: Use PostgreSQL if DATABASE_URL is set, otherwise SQLite
+DATABASE_URL = os.getenv("DATABASE_URL")
+if DATABASE_URL:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    USE_POSTGRES = True
+else:
+    import sqlite3
+    USE_POSTGRES = False
+    DB_PATH = script_dir / "vig.db"
 
 if not PRIVATE_KEY:
     print("❌ POLYGON_PRIVATE_KEY not found in .env")
@@ -50,18 +70,29 @@ CTF_ABI = [
 
 def get_won_bets_with_condition_ids():
     """Get all won bets that need redemption"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    
-    bets = conn.execute("""
-        SELECT id, market_question, condition_id, token_id, size, profit
-        FROM bets 
-        WHERE paper=0 AND result='won' AND condition_id IS NOT NULL AND condition_id != ''
-        ORDER BY placed_at
-    """).fetchall()
-    
-    conn.close()
-    return [dict(b) for b in bets]
+    if USE_POSTGRES:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT id, market_question, condition_id, token_id, size, profit
+            FROM bets 
+            WHERE paper=false AND result='won' AND condition_id IS NOT NULL AND condition_id != ''
+            ORDER BY placed_at
+        """)
+        bets = cur.fetchall()
+        conn.close()
+        return [dict(b) for b in bets]
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        bets = conn.execute("""
+            SELECT id, market_question, condition_id, token_id, size, profit
+            FROM bets 
+            WHERE paper=0 AND result='won' AND condition_id IS NOT NULL AND condition_id != ''
+            ORDER BY placed_at
+        """).fetchall()
+        conn.close()
+        return [dict(b) for b in bets]
 
 def redeem_position(w3, ctf, wallet, condition_id):
     """Redeem a single position"""
