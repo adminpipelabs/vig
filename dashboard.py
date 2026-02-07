@@ -982,17 +982,31 @@ def api_bot_status():
             # Bot never started or no heartbeat yet - use window fallback
             if last_window:
                 try:
-                    last_window_dt = datetime.fromisoformat(last_window.replace("Z", "+00:00"))
+                    # Handle both string and datetime objects
+                    if isinstance(last_window, str):
+                        last_window_str = last_window.replace("Z", "+00:00") if "Z" in last_window else last_window
+                        if "+" not in last_window_str and "-" not in last_window_str[-6:]:
+                            last_window_str = last_window_str + "+00:00"
+                        last_window_dt = datetime.fromisoformat(last_window_str)
+                    else:
+                        # Already a datetime object
+                        last_window_dt = last_window
+                    
+                    # Ensure timezone-aware
+                    if last_window_dt.tzinfo is None:
+                        last_window_dt = last_window_dt.replace(tzinfo=timezone.utc)
+                    
                     age_seconds = (datetime.now(timezone.utc) - last_window_dt).total_seconds()
                     if age_seconds < 3600:  # Within last hour
                         return {
                             "status": "running",
                             "activity": "Bot active (inferred from recent windows)",
-                            "last_scan": last_window,
-                            "updated_at": last_window,
-                            "last_window": last_window
+                            "last_scan": str(last_window),
+                            "updated_at": str(last_window),
+                            "last_window": str(last_window)
                         }
-                except:
+                except Exception as e:
+                    logger.error(f"[BOT-STATUS] Error parsing last_window: {e}", exc_info=True)
                     pass
             
             db.close()
@@ -1006,13 +1020,24 @@ def api_bot_status():
         
         # Parse last_heartbeat timestamp
         last_heartbeat_str = bot_status.get("last_heartbeat")
-        if isinstance(last_heartbeat_str, str):
+        last_heartbeat = None
+        if last_heartbeat_str:
             try:
-                last_heartbeat = datetime.fromisoformat(last_heartbeat_str.replace("Z", "+00:00"))
-            except:
+                if isinstance(last_heartbeat_str, str):
+                    heartbeat_str = last_heartbeat_str.replace("Z", "+00:00") if "Z" in last_heartbeat_str else last_heartbeat_str
+                    if "+" not in heartbeat_str and "-" not in heartbeat_str[-6:]:
+                        heartbeat_str = heartbeat_str + "+00:00"
+                    last_heartbeat = datetime.fromisoformat(heartbeat_str)
+                else:
+                    # Already a datetime object
+                    last_heartbeat = last_heartbeat_str
+                
+                # Ensure timezone-aware
+                if last_heartbeat.tzinfo is None:
+                    last_heartbeat = last_heartbeat.replace(tzinfo=timezone.utc)
+            except Exception as e:
+                logger.error(f"[BOT-STATUS] Error parsing last_heartbeat: {e}", exc_info=True)
                 last_heartbeat = None
-        else:
-            last_heartbeat = last_heartbeat_str
         
         # Determine if bot is online (heartbeat within last 2 minutes)
         status = bot_status.get("status", "unknown")
