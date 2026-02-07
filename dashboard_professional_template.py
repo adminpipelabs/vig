@@ -214,9 +214,10 @@ PROFESSIONAL_DASHBOARD_HTML = '''<!DOCTYPE html>
                 }
                 
                 const data = await r.json();
+                console.log(`✅ Fetched ${url}:`, data?.length || 'data received');
                 return data;
             } catch (e) {
-                console.error(`Fetch error for ${url}:`, e);
+                console.error(`❌ Fetch error for ${url}:`, e);
                 return null;
             }
         }
