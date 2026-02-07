@@ -484,27 +484,13 @@ PROFESSIONAL_DASHBOARD_HTML = '''<!DOCTYPE html>
             console.log('Bets loaded:', bets);
         }
 
-        // Separate refresh for recent activity (less frequent)
-        let recentActivityCounter = 0;
-        async function refreshRecentActivity() {
-            const bets = await fetchJSON('/api/bets?limit=10');
-            if (bets && bets.length > 0) {
-                updateRecentActivity(bets);
-            } else {
-                document.getElementById('activityFeed').innerHTML = '<div class="px-5 py-8 text-center text-sm text-gray-500">No recent activity</div>';
-            }
-        }
-
         // Initialize
         // Load essential data immediately
         refreshDashboard();
         refreshRecentActivity();
         
         // Refresh live markets (active positions) every 10 seconds - frequent updates
-        setInterval(refreshDashboard, 10000);
-        
-        // Refresh recent activity every 60 seconds - less frequent
-        setInterval(refreshRecentActivity, 60000);
+        refreshInterval = setInterval(refreshDashboard, 10000);
         
         // Refresh recent activity every 60 seconds - less frequent updates
         activityInterval = setInterval(refreshRecentActivity, 60000);
