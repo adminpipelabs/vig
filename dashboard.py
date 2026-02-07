@@ -98,7 +98,7 @@ def execute_query(conn, query, params=None):
 
 # ─── API Endpoints ─────────────────────────────────────────────
 
-@app.get("/api/wallet/balance", dependencies=[Depends(require_api_key)])
+@app.get("/api/wallet/balance")
 def api_wallet_balance():
     """Get wallet balance - available funds and locked funds"""
     conn = get_db()
@@ -147,7 +147,7 @@ def api_wallet_balance():
     }
 
 
-@app.get("/api/stats", dependencies=[Depends(require_api_key)])
+@app.get("/api/stats")
 def api_stats():
     conn = get_db()
     if is_postgres(conn):
@@ -325,7 +325,7 @@ def api_stats():
     return stats
 
 
-@app.get("/api/windows", dependencies=[Depends(require_api_key)])
+@app.get("/api/windows")
 def api_windows(limit: int = 50):
     """Get recent trading windows"""
     limit = validate_input(limit, max_limit=1000)
@@ -342,7 +342,7 @@ def api_windows(limit: int = 50):
     return rows
 
 
-@app.get("/api/bets", dependencies=[Depends(require_api_key)])
+@app.get("/api/bets")
 def api_bets(limit: int = 100):
     """Get recent bets"""
     limit = validate_input(limit, max_limit=1000)
@@ -361,7 +361,7 @@ def api_bets(limit: int = 100):
     return rows
 
 
-@app.get("/api/pending", dependencies=[Depends(require_api_key)])
+@app.get("/api/pending")
 def api_pending():
     conn = get_db()
     if is_postgres(conn):
@@ -544,7 +544,7 @@ def api_pnl_flow():
     }
 
 
-@app.get("/api/daily-stats", dependencies=[Depends(require_api_key)])
+@app.get("/api/daily-stats")
 def api_daily_stats(days: int = 7):
     """Get daily performance statistics for the last N days"""
     conn = get_db()
@@ -611,7 +611,7 @@ def api_daily_stats(days: int = 7):
     return {"daily_stats": daily_stats, "days": days}
 
 
-@app.get("/api/historical-summary", dependencies=[Depends(require_api_key)])
+@app.get("/api/historical-summary")
 def api_historical_summary():
     """Get summary statistics for different time periods"""
     conn = get_db()
@@ -941,7 +941,7 @@ def debug_status():
     return status
 
 
-@app.get("/api/bot-status", dependencies=[Depends(require_api_key)])
+@app.get("/api/bot-status")
 def api_bot_status():
     """Get bot status and activity from database heartbeat"""
     from db import Database

@@ -249,32 +249,16 @@ PROFESSIONAL_DASHBOARD_HTML = '''<!DOCTYPE html>
 
         async function fetchJSON(url) {
             try {
-                const apiKey = getApiKey();
-                const headers = {};
-                if (apiKey) {
-                    headers['X-API-Key'] = apiKey;
-                }
-                
-                const r = await fetch(url, { headers });
-                
-                // Handle 401 Unauthorized (skip for now - no API key required)
-                if (r.status === 401) {
-                    console.warn('API returned 401 - authentication may be required');
-                    return null;
-                }
-                
-                // Handle 429 Rate Limit
-                if (r.status === 429) {
-                    const data = await r.json();
-                    console.warn('Rate limit exceeded:', data.message);
-                    return null;
-                }
+                const r = await fetch(url);
                 
                 if (!r.ok) {
-                    console.error(`API error ${r.status} for ${url}`);
+                    const errorText = await r.text();
+                    console.error(`API error ${r.status} for ${url}:`, errorText);
                     return null;
                 }
-                return await r.json();
+                
+                const data = await r.json();
+                return data;
             } catch (e) {
                 console.error(`Fetch error for ${url}:`, e);
                 return null;
