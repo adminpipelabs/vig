@@ -90,34 +90,18 @@ class BetManager:
             order_args = OrderArgs(price=market.fav_price, size=size,
                                    side=BUY, token_id=market.fav_token_id)
             signed_order = self.clob_client.create_order(order_args)
-            resp = self.clob_client.post_order(signed_order, OrderType.GTC)
+            # Use FAK (Fill and Kill) - fills as much as possible, cancels remainder
+            # Better for immediate execution on expiring markets
+            resp = self.clob_client.post_order(signed_order, OrderType.FAK)
             if isinstance(resp, dict):
                 return resp.get("orderID", resp.get("id", str(resp)))
             return str(resp)
         except Exception as e:
             error_str = str(e)
-            # Check for Cloudflare blocking
-            if "403" in error_str or "Cloudflare" in error_str or "blocked" in error_str.lower():
-                # Only log detailed error once per window to reduce spam
-                if not self._cloudflare_error_logged:
-                    logger.error("=" * 60)
-                    logger.error("❌ CLOUDflare BLOCKING DETECTED")
-                    logger.error("CLOB API requests are being blocked by Cloudflare.")
-                    logger.error("This means RESIDENTIAL_PROXY_URL is either:")
-                    logger.error("  1. Not set correctly (contains placeholder values)")
-                    logger.error("  2. Not working (proxy server down/invalid)")
-                    logger.error("  3. Proxy itself is blocked")
-                    logger.error("=" * 60)
-                    logger.error("Check Railway environment variables:")
-                    logger.error("  - RESIDENTIAL_PROXY_URL should be: http://username:password@proxy-host:port")
-                    logger.error("  - Verify proxy is working by testing it manually")
-                    logger.error("=" * 60)
-                    self._cloudflare_error_logged = True
-                else:
-                    # Subsequent errors - just log briefly
-                    logger.debug("Order failed: Cloudflare blocking (403)")
-            else:
-                logger.error(f"Order failed: {e}")
+            # Log the actual error for debugging
+            logger.error(f"Order failed: {e}")
+            import traceback
+            logger.debug(f"Order error traceback: {traceback.format_exc()}")
             return None
 
     def settle_bets(self, window_id):
