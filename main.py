@@ -187,15 +187,9 @@ def main():
                 if settled_count > 0:
                     logger.info(f"✅ Settled {settled_count} pending bets before risk check")
 
-            # 1. Pre-window risk check (now with updated bet results)
+            # 1. Pre-window risk check (circuit breaker removed - bot continues trading)
             alerts = risk_mgr.check_pre_window()
-            if risk_mgr.should_stop(alerts):
-                for a in alerts:
-                    if a.level == "stop":
-                        notifier.circuit_breaker(a.reason, a.action)
-                logger.error("Circuit breaker: STOP. Exiting.")
-                db.update_bot_status("main", "stopped", None, "Circuit breaker triggered")
-                break
+            # Circuit breaker removed - bot will continue trading regardless of win rate
 
             clip_multiplier = risk_mgr.get_clip_multiplier(alerts)
             if clip_multiplier < 1.0:

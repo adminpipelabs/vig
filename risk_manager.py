@@ -24,28 +24,8 @@ class RiskManager:
 
     def check_pre_window(self) -> list[RiskAlert]:
         alerts = []
-
-        consec = self.db.get_consecutive_losses()
-        if consec >= self.config.circuit_breaker_consecutive_losses:
-            alerts.append(RiskAlert("stop", f"{consec} consecutive losses",
-                                    "Stop trading. Manual review required."))
-            self.db.log_circuit_breaker(f"{consec} consecutive losses", 0, "stopped")
-
-        recent = self.db.get_recent_bets(self.config.circuit_breaker_win_rate_lookback)
-        resolved = [b for b in recent if b.result in ("won", "lost")]
-        if len(resolved) >= 50:
-            wins = sum(1 for b in resolved if b.result == "won")
-            win_rate = wins / len(resolved)
-            if win_rate < self.config.circuit_breaker_win_rate_threshold:
-                if win_rate < 0.75:
-                    alerts.append(RiskAlert("stop",
-                        f"Win rate {win_rate:.1%} over last {len(resolved)} bets",
-                        "Stop trading. Strategy may be broken."))
-                    self.db.log_circuit_breaker(f"Win rate {win_rate:.1%}", 0, "stopped")
-                else:
-                    alerts.append(RiskAlert("reduce",
-                        f"Win rate {win_rate:.1%} below {self.config.circuit_breaker_win_rate_threshold:.0%}",
-                        "Reduce clip to 75%."))
+        # Circuit breaker removed - bot will continue trading regardless of win rate
+        # This allows continuous operation and capital deployment
 
         today_windows = self.db.get_recent_windows(12)
         today_profit = sum(w.profit for w in today_windows)
