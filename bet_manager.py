@@ -39,7 +39,14 @@ class BetManager:
             except Exception as e:
                 logger.warning(f"Could not check balance: {e}")
         
-        for market in candidates:
+        for i, market in enumerate(candidates):
+            # Add delay between orders to avoid rate limiting and appear less bot-like
+            # Random delay between 2-5 seconds to avoid pattern detection
+            if i > 0 and not self.config.paper_mode:
+                delay = random.uniform(2.0, 5.0)
+                logger.debug(f"Waiting {delay:.1f}s before next order to avoid rate limits...")
+                import time
+                time.sleep(delay)
             base_clip = self.snowball.get_clip_for_market(
                 max_clip_for_volume=market.max_clip or self.config.max_clip)
             clip = base_clip * clip_multiplier
@@ -70,10 +77,17 @@ class BetManager:
             else:
                 order_id = self._place_live_order(market, clip, size)
                 if not order_id:
-                    # Order failed - already logged in _place_live_order
+                    # Order failed - check if it's Cloudflare blocking
+                    # If so, stop trying more orders this window to avoid further blocks
+                    error_str = str(getattr(self, '_last_order_error', ''))
+                    if "403" in error_str or "Cloudflare" in error_str:
+                        logger.warning("Cloudflare blocking detected - stopping order placement for this window")
+                        break
                     continue
                 bet.order_id = order_id
                 logger.info(f"LIVE: {bet.side} {market.question[:50]} @ ${bet.price:.2f} -- ${bet.amount:.2f}")
+                # Reset error flag on success
+                self._last_order_error = None
 
             bet.id = self.db.insert_bet(bet)
             bets.append(bet)
@@ -98,8 +112,14 @@ class BetManager:
             return str(resp)
         except Exception as e:
             error_str = str(e)
+            # Store error for checking in place_bets loop
+            self._last_order_error = error_str
             # Log the actual error for debugging
-            logger.error(f"Order failed: {e}")
+            logger.error(f"Order failed: {type(e).__name__}: {e}")
+            # Check if it's Cloudflare blocking
+            if "403" in error_str or "Cloudflare" in error_str or "<html>" in error_str:
+                logger.warning("⚠️  Cloudflare blocking detected on order placement")
+                logger.warning("This may be due to datacenter IP reputation or rate limiting")
             import traceback
             logger.debug(f"Order error traceback: {traceback.format_exc()}")
             return None
