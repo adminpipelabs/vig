@@ -331,10 +331,14 @@ def main():
             # 11. Sleep until next window (guaranteed to run even on errors)
             if running:
                 sleep_start = datetime.now(timezone.utc)
-                logger.info(f"[SLEEP] Sleeping {config.scan_interval_seconds}s at {sleep_start.strftime('%H:%M:%S')} UTC")
-                db.update_bot_status("main", "idle", f"Sleeping {config.scan_interval_seconds}s until next scan")
+                # Add random jitter to scan interval (±30 seconds) to avoid predictable patterns
+                import random
+                jitter = random.uniform(-30, 30)
+                sleep_time = max(60, config.scan_interval_seconds + jitter)  # Minimum 60 seconds
+                logger.info(f"[SLEEP] Sleeping {sleep_time:.0f}s (base: {config.scan_interval_seconds}s + {jitter:+.0f}s jitter) at {sleep_start.strftime('%H:%M:%S')} UTC")
+                db.update_bot_status("main", "idle", f"Sleeping {sleep_time:.0f}s until next scan")
                 # Sleep in chunks to allow graceful shutdown
-                remaining = config.scan_interval_seconds
+                remaining = int(sleep_time)
                 while remaining > 0 and running:
                     sleep_chunk = min(remaining, 60)  # Check every 60 seconds
                     time.sleep(sleep_chunk)

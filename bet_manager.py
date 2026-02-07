@@ -40,12 +40,17 @@ class BetManager:
             except Exception as e:
                 logger.warning(f"Could not check balance: {e}")
         
-        for i, market in enumerate(candidates):
-            # Add delay between orders to avoid rate limiting and appear less bot-like
-            # Random delay between 2-5 seconds to avoid pattern detection
+        # Randomize order of markets to place bets (makes pattern less predictable)
+        import random
+        shuffled_candidates = candidates.copy()
+        random.shuffle(shuffled_candidates)
+        logger.info(f"Randomized order of {len(shuffled_candidates)} markets for placement")
+        
+        for i, market in enumerate(shuffled_candidates):
+            # Add random delay between orders (2-8 seconds) to avoid detection patterns
             if i > 0 and not self.config.paper_mode:
-                delay = random.uniform(2.0, 5.0)
-                logger.debug(f"Waiting {delay:.1f}s before next order to avoid rate limits...")
+                delay = random.uniform(2.0, 8.0)
+                logger.debug(f"Waiting {delay:.1f}s before next order (randomized)...")
                 import time
                 time.sleep(delay)
             base_clip = self.snowball.get_clip_for_market(
