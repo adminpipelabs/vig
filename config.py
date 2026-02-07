@@ -45,6 +45,11 @@ class Config:
     telegram_bot_token: str = field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", ""))
     telegram_chat_id: str = field(default_factory=lambda: os.getenv("TELEGRAM_CHAT_ID", ""))
 
+    # Builder API credentials (for order attribution on Builder Leaderboard)
+    builder_api_key: str = field(default_factory=lambda: os.getenv("POLY_BUILDER_API_KEY", ""))
+    builder_api_secret: str = field(default_factory=lambda: os.getenv("POLY_BUILDER_API_SECRET", ""))
+    builder_api_passphrase: str = field(default_factory=lambda: os.getenv("POLY_BUILDER_API_PASSPHRASE", ""))
+
     db_path: str = os.getenv("DB_PATH", "vig.db")
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
 

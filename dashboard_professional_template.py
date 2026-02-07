@@ -225,12 +225,11 @@ PROFESSIONAL_DASHBOARD_HTML = '''<!DOCTYPE html>
         async function refreshDashboard() {
             console.log('Refreshing dashboard...');
             // Only fetch essential data that changes frequently
-            const [stats, balance, pending, botStatus, bets] = await Promise.all([
+            const [stats, balance, pending, botStatus] = await Promise.all([
                 fetchJSON('/api/stats'),
                 fetchJSON('/api/wallet/balance'),
                 fetchJSON('/api/pending'),
-                fetchJSON('/api/bot-status'),
-                fetchJSON('/api/bets?limit=10')
+                fetchJSON('/api/bot-status')
             ]);
 
             console.log('API Results:', { stats: !!stats, balance: !!balance, pending: !!pending, botStatus: !!botStatus });
@@ -265,7 +264,7 @@ PROFESSIONAL_DASHBOARD_HTML = '''<!DOCTYPE html>
             // Update wallets
             updateWallets(balance, walletAddress);
 
-            // Update active positions
+            // Update active positions (LIVE MARKETS - updates frequently)
             if (pending && pending.length > 0) {
                 document.getElementById('activePositions').textContent = pending.length;
                 document.getElementById('activePositionsCount').textContent = pending.length + ' open positions';
@@ -274,13 +273,6 @@ PROFESSIONAL_DASHBOARD_HTML = '''<!DOCTYPE html>
                 document.getElementById('activePositions').textContent = '0';
                 document.getElementById('activePositionsCount').textContent = '0 open positions';
                 document.getElementById('activePositionsTable').innerHTML = '<tr><td colspan="5" class="px-5 py-8 text-center text-sm text-gray-500">No active positions</td></tr>';
-            }
-
-            // Update recent activity
-            if (bets && bets.length > 0) {
-                updateRecentActivity(bets);
-            } else {
-                document.getElementById('activityFeed').innerHTML = '<div class="px-5 py-8 text-center text-sm text-gray-500">No recent activity</div>';
             }
 
             // Update bot status
@@ -303,7 +295,16 @@ PROFESSIONAL_DASHBOARD_HTML = '''<!DOCTYPE html>
             } else {
                 document.getElementById('nextScan').textContent = '--';
             }
+        }
 
+        async function refreshRecentActivity() {
+            // Update recent activity (less frequent updates)
+            const bets = await fetchJSON('/api/bets?limit=10');
+            if (bets && bets.length > 0) {
+                updateRecentActivity(bets);
+            } else {
+                document.getElementById('activityFeed').innerHTML = '<div class="px-5 py-8 text-center text-sm text-gray-500">No recent activity</div>';
+            }
         }
 
         function updateWallets(balance, address) {
@@ -483,11 +484,30 @@ PROFESSIONAL_DASHBOARD_HTML = '''<!DOCTYPE html>
             console.log('Bets loaded:', bets);
         }
 
+        // Separate refresh for recent activity (less frequent)
+        let recentActivityCounter = 0;
+        async function refreshRecentActivity() {
+            const bets = await fetchJSON('/api/bets?limit=10');
+            if (bets && bets.length > 0) {
+                updateRecentActivity(bets);
+            } else {
+                document.getElementById('activityFeed').innerHTML = '<div class="px-5 py-8 text-center text-sm text-gray-500">No recent activity</div>';
+            }
+        }
+
         // Initialize
         // Load essential data immediately
         refreshDashboard();
-        // Refresh essential data every 15 seconds
-        refreshInterval = setInterval(refreshDashboard, 15000);
+        refreshRecentActivity();
+        
+        // Refresh live markets (active positions) every 10 seconds - frequent updates
+        setInterval(refreshDashboard, 10000);
+        
+        // Refresh recent activity every 60 seconds - less frequent
+        setInterval(refreshRecentActivity, 60000);
+        
+        // Refresh recent activity every 60 seconds - less frequent updates
+        activityInterval = setInterval(refreshRecentActivity, 60000);
     </script>
 </body>
 </html>'''
