@@ -197,24 +197,82 @@ PROFESSIONAL_DASHBOARD_HTML = '''<!DOCTYPE html>
             return Math.floor(s / 86400) + 'd ago';
         }
 
+        // Get API key from localStorage or prompt user
+        function getApiKey() {
+            let apiKey = localStorage.getItem('dashboard_api_key');
+            if (!apiKey) {
+                // Prompt for API key on first load
+                apiKey = prompt('Enter Dashboard API Key (or leave empty if not configured):');
+                if (apiKey) {
+                    localStorage.setItem('dashboard_api_key', apiKey);
+                }
+            }
+            return apiKey;
+        }
+
         async function fetchJSON(url) {
             try {
-                const r = await fetch(url);
-                if (!r.ok) return null;
+                const apiKey = getApiKey();
+                const headers = {};
+                if (apiKey) {
+                    headers['X-API-Key'] = apiKey;
+                }
+                
+                const r = await fetch(url, { headers });
+                
+                // Handle 401 Unauthorized
+                if (r.status === 401) {
+                    localStorage.removeItem('dashboard_api_key');
+                    const newKey = prompt('API key required. Enter Dashboard API Key:');
+                    if (newKey) {
+                        localStorage.setItem('dashboard_api_key', newKey);
+                        // Retry with new key
+                        headers['X-API-Key'] = newKey;
+                        const retry = await fetch(url, { headers });
+                        if (!retry.ok) return null;
+                        return await retry.json();
+                    }
+                    return null;
+                }
+                
+                // Handle 429 Rate Limit
+                if (r.status === 429) {
+                    const data = await r.json();
+                    console.warn('Rate limit exceeded:', data.message);
+                    return null;
+                }
+                
+                if (!r.ok) {
+                    console.error(`API error ${r.status} for ${url}`);
+                    return null;
+                }
                 return await r.json();
             } catch (e) {
-                console.error('Fetch error:', e);
+                console.error(`Fetch error for ${url}:`, e);
                 return null;
             }
         }
 
         async function refreshDashboard() {
+            console.log('Refreshing dashboard...');
             const [stats, balance, pending, botStatus] = await Promise.all([
                 fetchJSON('/api/stats'),
                 fetchJSON('/api/wallet/balance'),
                 fetchJSON('/api/pending'),
                 fetchJSON('/api/bot-status')
             ]);
+
+            console.log('API Results:', { stats: !!stats, balance: !!balance, pending: !!pending, botStatus: !!botStatus });
+
+            // Show connection status
+            const connected = stats || balance || pending || botStatus;
+            if (!connected) {
+                document.getElementById('statusBadge').innerHTML = `
+                    <span class="w-1.5 h-1.5 bg-danger rounded-full"></span>
+                    <span class="text-xs font-medium text-danger">Not Connected</span>
+                `;
+                console.error('No API data received - check DATABASE_URL on Railway');
+            }
 
             // Update portfolio summary
             if (stats) {
@@ -250,6 +308,22 @@ PROFESSIONAL_DASHBOARD_HTML = '''<!DOCTYPE html>
             // Update bot status
             if (botStatus) {
                 updateBotStatus(botStatus);
+            } else {
+                // Show error if bot status not available
+                document.getElementById('botStatus').textContent = 'Not Connected';
+                document.getElementById('botActivity').textContent = 'Check DATABASE_URL';
+                document.getElementById('statusDot').className = 'w-1.5 h-1.5 bg-danger rounded-full';
+            }
+
+            // Update next scan countdown
+            if (stats && stats.last_window_at) {
+                const nextScan = new Date(stats.last_window_at);
+                nextScan.setHours(nextScan.getHours() + 1);
+                const diff = nextScan - new Date();
+                const minutes = Math.floor(diff / 60000);
+                document.getElementById('nextScan').textContent = minutes > 0 ? minutes + 'm' : 'Now';
+            } else {
+                document.getElementById('nextScan').textContent = '--';
             }
         }
 
@@ -329,14 +403,21 @@ PROFESSIONAL_DASHBOARD_HTML = '''<!DOCTYPE html>
                 'running': { dot: 'bg-success', text: 'Running', activity: 'Active' },
                 'stopped': { dot: 'bg-gray-400', text: 'Stopped', activity: 'Inactive' },
                 'idle': { dot: 'bg-yellow-400', text: 'Idle', activity: 'Waiting' },
-                'error': { dot: 'bg-danger', text: 'Error', activity: 'Error' }
+                'error': { dot: 'bg-danger', text: 'Error', activity: 'Error' },
+                'scanning': { dot: 'bg-primary', text: 'Scanning', activity: 'Scanning markets' }
             };
 
             const s = statusMap[status.status] || statusMap['stopped'];
-            document.getElementById('statusDot').className = 'w-1.5 h-1.5 ' + s.dot + ' rounded-full pulse-dot';
-            document.getElementById('botStatus').textContent = s.text;
-            document.getElementById('botActivity').textContent = status.current_window || s.activity;
-            document.getElementById('lastWindow').textContent = status.current_window || '--';
+            const dotEl = document.getElementById('statusDot');
+            if (dotEl) {
+                dotEl.className = 'w-1.5 h-1.5 ' + s.dot + ' rounded-full' + (status.status === 'running' ? ' pulse-dot' : '');
+            }
+            const statusEl = document.getElementById('botStatus');
+            if (statusEl) statusEl.textContent = s.text;
+            const activityEl = document.getElementById('botActivity');
+            if (activityEl) activityEl.textContent = status.current_window || status.activity || s.activity;
+            const windowEl = document.getElementById('lastWindow');
+            if (windowEl) windowEl.textContent = status.current_window || '--';
         }
 
         async function controlBot(action) {
@@ -346,9 +427,26 @@ PROFESSIONAL_DASHBOARD_HTML = '''<!DOCTYPE html>
             btn.textContent = 'Processing...';
 
             try {
-                const formData = new FormData();
+                const apiKey = getApiKey();
+                const headers = { 'Content-Type': 'application/x-www-form-urlencoded' };
+                if (apiKey) {
+                    headers['X-API-Key'] = apiKey;
+                }
+                
+                const formData = new URLSearchParams();
                 formData.append('action', action);
-                const response = await fetch('/api/bot-control', { method: 'POST', body: formData });
+                
+                const response = await fetch('/api/bot-control', {
+                    method: 'POST',
+                    headers: headers,
+                    body: formData
+                });
+                
+                if (response.status === 401) {
+                    alert('Authentication required. Please refresh and enter API key.');
+                    return;
+                }
+                
                 const result = await response.json();
                 alert(result.message || 'Action completed');
                 if (action === 'restart') {

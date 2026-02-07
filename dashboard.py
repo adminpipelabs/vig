@@ -6,7 +6,7 @@ import os
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.responses import HTMLResponse, JSONResponse
 import httpx
 import logging
@@ -25,6 +25,20 @@ logging.getLogger("hpack").setLevel(logging.WARNING)
 logger = logging.getLogger("vig.dashboard")
 
 app = FastAPI(title="Vig Dashboard")
+
+# Import security modules
+from api_security import (
+    SecurityHeadersMiddleware,
+    RateLimitMiddleware,
+    require_api_key,
+    get_api_key_from_request,
+    validate_limit as validate_input,
+    get_client_id
+)
+
+# Add security middleware
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RateLimitMiddleware)
 
 DB_PATH = os.getenv("DB_PATH", "vig.db")
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -84,7 +98,7 @@ def execute_query(conn, query, params=None):
 
 # ─── API Endpoints ─────────────────────────────────────────────
 
-@app.get("/api/wallet/balance")
+@app.get("/api/wallet/balance", dependencies=[Depends(require_api_key)])
 def api_wallet_balance():
     """Get wallet balance - available funds and locked funds"""
     conn = get_db()
@@ -133,7 +147,7 @@ def api_wallet_balance():
     }
 
 
-@app.get("/api/stats")
+@app.get("/api/stats", dependencies=[Depends(require_api_key)])
 def api_stats():
     conn = get_db()
     if is_postgres(conn):
@@ -311,8 +325,10 @@ def api_stats():
     return stats
 
 
-@app.get("/api/windows")
+@app.get("/api/windows", dependencies=[Depends(require_api_key)])
 def api_windows(limit: int = 50):
+    """Get recent trading windows"""
+    limit = validate_input(limit, max_limit=1000)
     conn = get_db()
     if is_postgres(conn):
         from psycopg2.extras import RealDictCursor
@@ -326,8 +342,10 @@ def api_windows(limit: int = 50):
     return rows
 
 
-@app.get("/api/bets")
+@app.get("/api/bets", dependencies=[Depends(require_api_key)])
 def api_bets(limit: int = 100):
+    """Get recent bets"""
+    limit = validate_input(limit, max_limit=1000)
     conn = get_db()
     # Use RealDictCursor for PostgreSQL, regular cursor for SQLite
     if is_postgres(conn):
@@ -343,7 +361,7 @@ def api_bets(limit: int = 100):
     return rows
 
 
-@app.get("/api/pending")
+@app.get("/api/pending", dependencies=[Depends(require_api_key)])
 def api_pending():
     conn = get_db()
     if is_postgres(conn):
@@ -358,7 +376,7 @@ def api_pending():
     return rows
 
 
-@app.get("/api/circuit-breaker")
+@app.get("/api/circuit-breaker", dependencies=[Depends(require_api_key)])
 def api_circuit_breaker():
     conn = get_db()
     if is_postgres(conn):
@@ -372,7 +390,7 @@ def api_circuit_breaker():
     return rows
 
 
-@app.get("/api/equity-curve")
+@app.get("/api/equity-curve", dependencies=[Depends(require_api_key)])
 def api_equity_curve():
     conn = get_db()
     if is_postgres(conn):
@@ -397,7 +415,7 @@ def api_equity_curve():
     return curve
 
 
-@app.get("/api/pnl-flow")
+@app.get("/api/pnl-flow", dependencies=[Depends(require_api_key)])
 def api_pnl_flow():
     """Get complete P&L cash flow with running balance"""
     conn = get_db()
@@ -711,7 +729,7 @@ def debug_status():
     return status
 
 
-@app.get("/api/bot-status")
+@app.get("/api/bot-status", dependencies=[Depends(require_api_key)])
 def api_bot_status():
     """Get bot status and activity from database heartbeat"""
     from db import Database
@@ -904,7 +922,7 @@ async def restart_deployment(railway_token: str, service_id: str) -> dict:
         return {"success": False, "error": str(e)}
 
 
-@app.post("/api/bot-control")
+@app.post("/api/bot-control", dependencies=[Depends(require_api_key)])
 async def api_bot_control(action: str):
     """Control bot (start/stop/restart) using Railway API"""
     import time
@@ -980,7 +998,7 @@ async def api_bot_control(action: str):
     return result
 
 
-@app.get("/api/scan")
+@app.get("/api/scan", dependencies=[Depends(require_api_key)])
 def api_scan():
     """Live scan — hit Polymarket Gamma API right now and return qualifying markets."""
     now = datetime.now(timezone.utc)
@@ -1085,390 +1103,7 @@ def api_scan():
 def pnl_page():
     """P&L Cash Flow page"""
     return """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>P&L Flow — Vig Dashboard</title>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
-<style>
-:root {
-  --bg: #0a0b0e; --surface: #12131a; --surface2: #1a1c25;
-  --border: #252833; --text: #e4e6ed; --text-dim: #6b7084;
-  --green: #00e676; --green-dim: rgba(0,230,118,0.12);
-  --red: #ff5252; --red-dim: rgba(255,82,82,0.12);
-  --amber: #ffd740; --amber-dim: rgba(255,215,64,0.12);
-  --blue: #448aff; --blue-dim: rgba(68,138,255,0.12);
-  --cyan: #18ffff; --cyan-dim: rgba(24,255,255,0.12);
-  --font-mono: 'JetBrains Mono', monospace;
-  --font-display: 'Space Grotesk', sans-serif;
-}
-* { margin:0; padding:0; box-sizing:border-box; }
-body { background:var(--bg); color:var(--text); font-family:var(--font-mono); font-size:13px; line-height:1.5; min-height:100vh; }
-.header { display:flex; align-items:center; justify-content:space-between; padding:16px 24px; border-bottom:1px solid var(--border); background:var(--surface); }
-.logo { font-family:var(--font-display); font-size:22px; font-weight:700; letter-spacing:-0.5px; }
-.logo span { color:var(--green); }
-.logo a { color:inherit; text-decoration:none; }
-.container { padding:20px 24px; max-width:1600px; margin:0 auto; }
-.summary { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:24px; }
-.card { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:16px 20px; }
-.card-title { font-size:11px; text-transform:uppercase; letter-spacing:1px; color:var(--text-dim); font-weight:500; margin-bottom:8px; }
-.card-value { font-family:var(--font-display); font-size:24px; font-weight:700; letter-spacing:-1px; }
-.card-value.positive { color:var(--green); }
-.card-value.negative { color:var(--red); }
-.table-container { background:var(--surface); border:1px solid var(--border); border-radius:8px; overflow:hidden; }
-table { width:100%; border-collapse:collapse; }
-thead { background:var(--surface2); }
-th { text-align:left; padding:12px 16px; font-size:11px; text-transform:uppercase; letter-spacing:0.5px; color:var(--text-dim); font-weight:500; border-bottom:1px solid var(--border); }
-td { padding:12px 16px; border-bottom:1px solid var(--border); font-size:12px; }
-tr:hover { background:var(--surface2); }
-.tag { display:inline-block; padding:2px 8px; border-radius:4px; font-size:10px; font-weight:500; text-transform:uppercase; }
-.tag.won { background:var(--green-dim); color:var(--green); }
-.tag.lost { background:var(--red-dim); color:var(--red); }
-.tag.pending { background:var(--amber-dim); color:var(--amber); }
-.tag.yes { background:var(--blue-dim); color:var(--blue); }
-.tag.no { background:var(--cyan-dim); color:var(--cyan); }
-.type-bet { color:var(--red); }
-.type-settlement { color:var(--green); }
-.type-starting { color:var(--text-dim); }
-</style>
-</head>
-<body>
-<div class="header">
-  <div class="logo"><a href="/">Vig <span>Dashboard</span></a> → P&L Flow</div>
-  <div id="lastUpdate">Loading...</div>
-</div>
-<div class="container">
-  <div class="summary">
-    <div class="card">
-      <div class="card-title">Starting Balance</div>
-      <div class="card-value" id="startBalance">--</div>
-    </div>
-    <div class="card">
-      <div class="card-title">Current Balance</div>
-      <div class="card-value" id="currentBalance">--</div>
-    </div>
-    <div class="card">
-      <div class="card-title">Total Deployed</div>
-      <div class="card-value" id="totalDeployed">--</div>
-    </div>
-    <div class="card">
-      <div class="card-title">Net P&L</div>
-      <div class="card-value" id="netPnl">--</div>
-    </div>
-  </div>
-  <div class="table-container">
-    <table>
-      <thead>
-        <tr>
-          <th>Date</th>
-          <th>Type</th>
-          <th>Description</th>
-          <th>Side</th>
-          <th>Amount</th>
-          <th>Payout</th>
-          <th>Profit</th>
-          <th>Balance</th>
-        </tr>
-      </thead>
-      <tbody id="flowTable"></tbody>
-    </table>
-  </div>
-</div>
-<script>
-async function fetchJSON(path) {
-  const r=await fetch(path);
-  if(!r.ok) throw new Error(r.statusText);
-  return r.json();
-}
-
-function fmt(n) {
-  if(n===null||n===undefined) return '--';
-  const v=parseFloat(n);
-  if(isNaN(v)) return '--';
-  return (v>=0?'+':'')+'$'+v.toFixed(2);
-}
-
-function formatDate(d) {
-  if(!d) return '--';
-  const dt=new Date(d);
-  const months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  const month=months[dt.getMonth()];
-  const day=dt.getDate();
-  const year=dt.getFullYear();
-  let hours=dt.getHours();
-  const minutes=dt.getMinutes();
-  const ampm=hours>=12?'PM':'AM';
-  hours=hours%12;
-  hours=hours?hours:12;
-  const mins=minutes<10?'0'+minutes:minutes;
-  return month+' '+day+', '+year+', '+hours+':'+mins+' '+ampm;
-}
-
-async function refresh() {
-  try {
-    const data=await fetchJSON('/api/pnl-flow');
-    const {starting_balance,current_balance,flow}=data;
-    
-    document.getElementById('startBalance').textContent=fmt(starting_balance);
-    document.getElementById('currentBalance').textContent=fmt(current_balance);
-    document.getElementById('currentBalance').className='card-value '+(current_balance>=starting_balance?'positive':'negative');
-    
-    let totalDeployed=0;
-    let netPnl=0;
-    let html='';
-    
-    for(const f of flow) {
-      if(f.type==='starting_balance') {
-        html+=`<tr style="background:var(--surface2);">
-          <td colspan="7"><strong>Starting Balance</strong></td>
-          <td><strong>${fmt(f.balance)}</strong></td>
-        </tr>`;
-      } else if(f.type==='bet_placed') {
-        totalDeployed+=f.amount||0;
-        html+=`<tr>
-          <td>${formatDate(f.date)}</td>
-          <td><span class="type-bet">BET</span></td>
-          <td title="${f.market||''}">${(f.market||'').substring(0,50)}${(f.market||'').length>50?'...':''}</td>
-          <td><span class="tag ${f.side==='YES'?'yes':'no'}">${f.side||'--'}</span></td>
-          <td class="type-bet">${fmt(-(f.amount||0))}</td>
-          <td>--</td>
-          <td>--</td>
-          <td>${fmt(f.balance)}</td>
-        </tr>`;
-      } else if(f.type==='settlement') {
-        netPnl+=f.profit||0;
-        html+=`<tr>
-          <td>${formatDate(f.date)}</td>
-          <td><span class="type-settlement">SETTLE</span></td>
-          <td title="${f.market||''}">${(f.market||'').substring(0,50)}${(f.market||'').length>50?'...':''}</td>
-          <td><span class="tag ${f.side==='YES'?'yes':'no'}">${f.side||'--'}</span></td>
-          <td>--</td>
-          <td class="type-settlement">${fmt(f.payout)}</td>
-          <td class="${(f.profit||0)>=0?'positive':'negative'}">${fmt(f.profit)}</td>
-          <td>${fmt(f.balance)}</td>
-        </tr>`;
-      }
-    }
-    
-    document.getElementById('flowTable').innerHTML=html;
-    document.getElementById('totalDeployed').textContent=fmt(totalDeployed);
-    document.getElementById('netPnl').textContent=fmt(netPnl);
-    document.getElementById('netPnl').className='card-value '+(netPnl>=0?'positive':'negative');
-    document.getElementById('lastUpdate').textContent='Updated '+new Date().toLocaleTimeString();
-  } catch(e) {
-    console.error('Refresh error:',e);
-    document.getElementById('lastUpdate').textContent='Error: '+e.message;
-  }
-}
-
-refresh();setInterval(refresh,30000);
-</script>
-</body>
-</html>"""
-
-
-@app.get("/", response_class=HTMLResponse)
-def dashboard():
-    # Get wallet address from config
-    from config import Config
-    config = Config()
-    wallet_address = config.funder_address or "0x989B7F2308924eA72109367467B8F8e4d5ea5A1D"
-    
-    # Load professional template
-    try:
-        from dashboard_professional_template import PROFESSIONAL_DASHBOARD_HTML
-        html_template = PROFESSIONAL_DASHBOARD_HTML.replace("{{WALLET_ADDRESS}}", wallet_address)
-        return html_template
-    except ImportError:
-        # Fallback: return basic message if template not found
-        return f"""<!DOCTYPE html><html><body><h1>Dashboard Loading...</h1><p>Template not found. Wallet: {wallet_address}</p></body></html>"""
-
-
-@app.get("/pnl", response_class=HTMLResponse)
-def pnl_page():
-    """P&L Cash Flow Table Page"""
-    return """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>P&L Cash Flow — Vig Dashboard</title>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
-<style>
-:root {
-  --bg: #0a0b0e; --surface: #12131a; --surface2: #1a1c25;
-  --border: #252833; --text: #e4e6ed; --text-dim: #6b7084;
-  --green: #00e676; --green-dim: rgba(0,230,118,0.12);
-  --red: #ff5252; --red-dim: rgba(255,82,82,0.12);
-  --amber: #ffd740; --amber-dim: rgba(255,215,64,0.12);
-  --blue: #448aff; --blue-dim: rgba(68,138,255,0.12);
-  --cyan: #18ffff; --cyan-dim: rgba(24,255,255,0.12);
-  --font-mono: 'JetBrains Mono', monospace;
-  --font-display: 'Space Grotesk', sans-serif;
-}
-* { margin:0; padding:0; box-sizing:border-box; }
-body { background:var(--bg); color:var(--text); font-family:var(--font-mono); font-size:13px; line-height:1.5; min-height:100vh; padding:20px; }
-.header { display:flex; align-items:center; justify-content:space-between; margin-bottom:24px; padding-bottom:16px; border-bottom:1px solid var(--border); }
-.header h1 { font-family:var(--font-display); font-size:24px; font-weight:700; }
-.header a { color:var(--cyan); text-decoration:none; font-size:12px; }
-.header a:hover { text-decoration:underline; }
-.summary { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; margin-bottom:24px; }
-.summary-card { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:16px; }
-.summary-label { font-size:11px; text-transform:uppercase; color:var(--text-dim); margin-bottom:8px; }
-.summary-value { font-family:var(--font-display); font-size:24px; font-weight:700; }
-.summary-value.positive { color:var(--green); }
-.summary-value.negative { color:var(--red); }
-.table-container { background:var(--surface); border:1px solid var(--border); border-radius:8px; overflow:hidden; }
-table { width:100%; border-collapse:collapse; }
-thead { background:var(--surface2); }
-th { text-align:left; padding:12px 16px; font-size:11px; text-transform:uppercase; color:var(--text-dim); font-weight:600; border-bottom:1px solid var(--border); }
-td { padding:12px 16px; border-bottom:1px solid var(--border); font-size:12px; }
-tbody tr:hover { background:var(--surface2); }
-.type-badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:10px; font-weight:500; text-transform:uppercase; }
-.type-badge.starting { background:var(--blue-dim); color:var(--blue); }
-.type-badge.bet { background:var(--amber-dim); color:var(--amber); }
-.type-badge.settlement { background:var(--green-dim); color:var(--green); }
-.result-badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:10px; font-weight:500; }
-.result-badge.won { background:var(--green-dim); color:var(--green); }
-.result-badge.lost { background:var(--red-dim); color:var(--red); }
-.result-badge.pending { background:var(--amber-dim); color:var(--amber); }
-.amount { font-weight:500; }
-.amount.debit { color:var(--red); }
-.amount.credit { color:var(--green); }
-.balance { font-weight:600; font-family:var(--font-display); }
-.balance.positive { color:var(--green); }
-.balance.negative { color:var(--red); }
-.market { max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.loading { text-align:center; padding:40px; color:var(--text-dim); }
-</style>
-</head>
-<body>
-<div class="header">
-  <h1>P&L Cash Flow</h1>
-  <a href="/">← Back to Dashboard</a>
-</div>
-
-<div class="summary" id="summary">
-  <div class="summary-card">
-    <div class="summary-label">Starting Balance</div>
-    <div class="summary-value" id="startBalance">--</div>
-  </div>
-  <div class="summary-card">
-    <div class="summary-label">Current Balance</div>
-    <div class="summary-value" id="currentBalance">--</div>
-  </div>
-  <div class="summary-card">
-    <div class="summary-label">Net P&L</div>
-    <div class="summary-value" id="netPnl">--</div>
-  </div>
-</div>
-
-<div class="table-container">
-  <table>
-    <thead>
-      <tr>
-        <th>Date</th>
-        <th>Type</th>
-        <th>Market</th>
-        <th>Side</th>
-        <th>Amount</th>
-        <th>Payout</th>
-        <th>Profit</th>
-        <th>Balance</th>
-      </tr>
-    </thead>
-    <tbody id="flowTable">
-      <tr><td colspan="8" class="loading">Loading cash flow data...</td></tr>
-    </tbody>
-  </table>
-</div>
-
-<script>
-function fmt(n) {
-  if(n===null||n===undefined)return'--';
-  const v=parseFloat(n);
-  if(isNaN(v))return'--';
-  return(v>=0?'+':'')+'$'+v.toFixed(2);
-}
-
-function formatDate(d) {
-  if(!d)return'--';
-  try{
-    const dt=new Date(d);
-    const months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    const month=months[dt.getMonth()];
-    const day=dt.getDate();
-    const year=dt.getFullYear();
-    let hours=dt.getHours();
-    const minutes=dt.getMinutes();
-    const ampm=hours>=12?'PM':'AM';
-    hours=hours%12;
-    hours=hours?hours:12;
-    const mins=minutes<10?'0'+minutes:minutes;
-    return month+' '+day+', '+year+', '+hours+':'+mins+' '+ampm;
-  }catch{return d;}
-}
-
-async function loadFlow() {
-  try {
-    const res=await fetch('/api/pnl-flow');
-    const data=await res.json();
-    
-    // Update summary
-    document.getElementById('startBalance').textContent=fmt(data.starting_balance);
-    document.getElementById('currentBalance').textContent=fmt(data.current_balance);
-    const netPnl=data.current_balance-data.starting_balance;
-    const pnlEl=document.getElementById('netPnl');
-    pnlEl.textContent=fmt(netPnl);
-    pnlEl.className='summary-value '+(netPnl>=0?'positive':'negative');
-    
-    // Build table
-    let html='';
-    for(const f of data.flow) {
-      const date=formatDate(f.date);
-      let typeBadge='',amount='',payout='',profit='',balance='';
-      
-      if(f.type==='starting_balance') {
-        typeBadge='<span class="type-badge starting">START</span>';
-        balance='<span class="balance positive">'+fmt(f.balance)+'</span>';
-      } else if(f.type==='bet_placed') {
-        typeBadge='<span class="type-badge bet">BET</span>';
-        amount='<span class="amount debit">-'+fmt(f.amount)+'</span>';
-        balance='<span class="balance">'+fmt(f.balance)+'</span>';
-      } else if(f.type==='settlement') {
-        typeBadge='<span class="type-badge settlement">SETTLE</span>';
-        payout='<span class="amount credit">+'+fmt(f.payout)+'</span>';
-        profit='<span class="amount '+(f.profit>=0?'credit':'debit')+'">'+fmt(f.profit)+'</span>';
-        balance='<span class="balance '+(f.balance>=0?'positive':'negative')+'">'+fmt(f.balance)+'</span>';
-      }
-      
-      const resultBadge=f.result?('<span class="result-badge '+f.result+'">'+f.result.toUpperCase()+'</span>'):'';
-      const market=(f.market||'').substring(0,40)+((f.market||'').length>40?'...':'');
-      
-      html+='<tr>';
-      html+='<td>'+date+'</td>';
-      html+='<td>'+typeBadge+'</td>';
-      html+='<td class="market" title="'+(f.market||'')+'">'+market+'</td>';
-      html+='<td>'+(f.side||'--')+'</td>';
-      html+='<td>'+amount+'</td>';
-      html+='<td>'+payout+'</td>';
-      html+='<td>'+profit+'</td>';
-      html+='<td>'+balance+'</td>';
-      html+='</tr>';
-    }
-    
-    document.getElementById('flowTable').innerHTML=html;
-  } catch(e) {
-    document.getElementById('flowTable').innerHTML='<tr><td colspan="8" class="loading">Error loading data: '+e.message+'</td></tr>';
-  }
-}
-
-loadFlow();
-setInterval(loadFlow,30000);
-</script>
-</body>
-</html>"""
+<html><body><h1>P&L Flow</h1><p>Coming soon</p></body></html>"""
 
 
 if __name__ == "__main__":
