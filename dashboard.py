@@ -274,21 +274,14 @@ def api_stats():
         client.set_api_creds(client.create_or_derive_api_creds())
         params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=0)
         balance_info = client.get_balance_allowance(params)
-        clob_cash_raw = float(balance_info.get('balance', 0)) / 1e6
+        clob_cash = float(balance_info.get('balance', 0)) / 1e6
         
-        # Temporary adjustment: Add recently redeemed amount
-        # Redemption transactions succeeded but CLOB API may not have updated yet
-        # This accounts for the $164.06 redeemed in the last redemption run
-        # TODO: Track redemptions in database or wait for CLOB API to update
-        recent_redemption_amount = 164.06  # Amount redeemed in last redemption run (2026-02-06)
-        
-        # Add redemption amount to CLOB balance to reflect actual available cash
-        # This is a temporary fix until CLOB API updates or we implement redemption tracking
-        clob_cash = clob_cash_raw + recent_redemption_amount
-        logger.info(f"CLOB balance: ${clob_cash_raw:.2f} + redemption ${recent_redemption_amount:.2f} = ${clob_cash:.2f}")
-        
+        # Use CLOB balance directly (it should reflect redemptions after API updates)
+        # If CLOB API hasn't updated yet, the balance will be lower temporarily
+        # Redemptions are tracked via blockchain transactions, so balance will catch up
         stats["current_cash"] = clob_cash
-        stats["clob_cash_raw"] = clob_cash_raw  # Store raw CLOB balance for reference
+        stats["clob_cash_raw"] = clob_cash  # Store CLOB balance for reference
+        logger.info(f"CLOB balance: ${clob_cash:.2f}")
     except Exception as e:
         # Cloudflare blocking or other CLOB API errors - calculate from database
         logger.warning(f"Could not fetch CLOB balance (Cloudflare blocking?): {e}")
