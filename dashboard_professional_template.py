@@ -441,9 +441,6 @@ PROFESSIONAL_DASHBOARD_HTML = '''<!DOCTYPE html>
         refreshDashboard();
         // Refresh essential data every 15 seconds
         refreshInterval = setInterval(refreshDashboard, 15000);
-        
-        // Load performance tracking once on page load (doesn't need frequent updates)
-        loadPerformanceTracking();
     </script>
 </body>
 </html>'''
