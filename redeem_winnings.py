@@ -208,10 +208,21 @@ def main():
     print("   (One redemption per condition covers all positions in that market)")
     print()
     
-    # Confirm
-    print("⚠️  WARNING: This will redeem ALL winning positions for these conditions.")
-    print("   Make sure you want to proceed.")
-    print()
+    # Auto-proceed if running non-interactively (e.g., from cron)
+    import sys
+    is_interactive = sys.stdin.isatty()
+    
+    if is_interactive:
+        print("⚠️  WARNING: This will redeem ALL winning positions for these conditions.")
+        print("   Make sure you want to proceed.")
+        print()
+        response = input("Proceed with redemption? (y/n): ").strip().lower()
+        if response != 'y':
+            print("Cancelled.")
+            return
+    else:
+        print("⚠️  Auto-redeeming all winning positions (non-interactive mode)...")
+        print()
     
     # Redeem each unique condition
     successful = 0
