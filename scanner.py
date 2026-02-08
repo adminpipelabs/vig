@@ -68,7 +68,8 @@ class Scanner:
         filtered = self._apply_volume_filter(candidates)
         logger.info(f"After volume filter: {len(filtered)} markets")
 
-        filtered.sort(key=lambda m: m.volume, reverse=True)
+        # Prioritize markets expiring soon (next 15-30 min) - sort by expiry time first, then volume
+        filtered.sort(key=lambda m: (m.minutes_to_expiry < 30, -m.volume, m.minutes_to_expiry))
         result = filtered[:self.config.max_bets_per_window]
 
         logger.info(f"Final candidates: {len(result)} markets")
@@ -82,7 +83,7 @@ class Scanner:
             "closed": "false",
             "end_date_min": window_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "end_date_max": window_end.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "limit": 100,
+            "limit": 500,  # Increased to catch more markets
             "order": "volume24hr",
             "ascending": "false",
         }

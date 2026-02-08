@@ -212,7 +212,12 @@ class VigAgent:
             # Limit to max_bets_per_window (but this is now 100, so rarely hits)
             to_bet = new_candidates[:self.config.max_bets_per_window]
             
-            # Place bets
+            # Place bets - prioritize markets expiring soon
+            expiring_soon = [m for m in to_bet if m.minutes_to_expiry < 30]
+            if expiring_soon:
+                logger.info(f"🚨 {len(expiring_soon)} markets expiring in <30min - prioritizing...")
+                to_bet = expiring_soon + [m for m in to_bet if m not in expiring_soon]
+            
             logger.info(f"Placing bets on {len(to_bet)} new markets...")
             bets = self.bet_mgr.place_bets(to_bet, self.cycle_count, 1.0)  # clip_multiplier always 1.0
             
@@ -222,7 +227,8 @@ class VigAgent:
                     self.open_positions.add(bet.market_id)
                 
                 total_deployed = sum(b.amount for b in bets)
-                logger.info(f"✅ Placed {len(bets)} bets, ${total_deployed:.2f} deployed")
+                expiring_bets = sum(1 for b in bets if any(m.minutes_to_expiry < 30 for m in to_bet if m.market_id == b.market_id))
+                logger.info(f"✅ Placed {len(bets)} bets (${total_deployed:.2f} deployed, {expiring_bets} expiring soon)")
                 
                 # Update snowball (but don't wait for settlement)
                 # Settlement happens in next cycle

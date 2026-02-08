@@ -22,7 +22,7 @@ class Config:
     min_favorite_price: float = float(os.getenv("MIN_FAVORITE_PRICE", "0.50"))  # Was 0.70
     max_favorite_price: float = float(os.getenv("MAX_FAVORITE_PRICE", "0.99"))  # Was 0.90
     expiry_window_minutes: int = int(os.getenv("EXPIRY_WINDOW_MINUTES", "1440"))  # 24 hours - no expiry filter
-    max_bets_per_window: int = int(os.getenv("MAX_BETS_PER_WINDOW", "100"))  # Was 10
+    max_bets_per_window: int = int(os.getenv("MAX_BETS_PER_WINDOW", "500"))  # High volume - catch expiring markets fast
     starting_clip: float = float(os.getenv("STARTING_CLIP", "10.0"))
     max_clip: float = float(os.getenv("MAX_CLIP", "100.0"))
     snowball_reinvest_pct: float = 0.50
@@ -37,9 +37,9 @@ class Config:
     circuit_breaker_win_rate_lookback: int = 100
     circuit_breaker_window_max_losses: int = 999  # Disabled
 
-    # Agent always-on polling (not scheduled scans)
-    poll_interval_seconds: int = int(os.getenv("POLL_INTERVAL_SECONDS", "10"))  # Was 3600 (60 min)
-    scan_interval_seconds: int = int(os.getenv("SCAN_INTERVAL_SECONDS", "10"))  # Keep for backward compat
+    # Agent always-on polling (not scheduled scans) - FAST for expiring markets
+    poll_interval_seconds: int = int(os.getenv("POLL_INTERVAL_SECONDS", "5"))  # 5 seconds for speed
+    scan_interval_seconds: int = int(os.getenv("SCAN_INTERVAL_SECONDS", "5"))  # Keep for backward compat
     settle_check_interval_seconds: int = 30
     settle_timeout_seconds: int = 60 * 90
 
