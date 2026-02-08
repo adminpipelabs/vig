@@ -112,9 +112,9 @@ class Scanner:
                 return None
 
             minutes_to_expiry = (end_date - now).total_seconds() / 60
-            # Filter: only markets expiring within the expiry window (typically 60 minutes)
-            if minutes_to_expiry <= 0 or minutes_to_expiry > self.config.expiry_window_minutes:
-                return None
+            # Vig v2: Accept any market expiring in the future (no expiry window filter)
+            if minutes_to_expiry <= 0:
+                return None  # Only reject already-expired markets
 
             prices = self._parse_prices(market.get("outcomePrices", ""))
             if not prices or len(prices) < 2:
@@ -135,17 +135,17 @@ class Scanner:
             if not market.get("enableOrderBook", True):
                 return None
 
+            # Vig v2: Accept any favorite > 50% (min_favorite_price defaults to 0.50)
             min_p = self.config.min_favorite_price
-            max_p = self.config.max_favorite_price
 
-            if min_p <= yes_price <= max_p:
+            if yes_price >= min_p:
                 fav_side, fav_price, fav_token = "YES", yes_price, yes_token_id
                 other_side, other_price, other_token = "NO", no_price, no_token_id
-            elif min_p <= no_price <= max_p:
+            elif no_price >= min_p:
                 fav_side, fav_price, fav_token = "NO", no_price, no_token_id
                 other_side, other_price, other_token = "YES", yes_price, yes_token_id
             else:
-                return None
+                return None  # Neither side is favorite (both < 50%)
 
             return MarketCandidate(
                 market_id=market_id, condition_id=condition_id,
@@ -160,11 +160,11 @@ class Scanner:
             return None
 
     def _apply_volume_filter(self, candidates):
+        # Vig v2: No volume filter - accept all candidates
         filtered = []
         for m in candidates:
-            if m.volume < self.config.min_volume_abs:
-                continue
-            m.max_clip = m.volume * self.config.max_volume_pct
+            # Still calculate max_clip for risk management, but don't filter by volume
+            m.max_clip = m.volume * self.config.max_volume_pct if m.volume > 0 else float('inf')
             filtered.append(m)
         return filtered
 
