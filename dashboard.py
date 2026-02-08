@@ -327,10 +327,11 @@ def api_windows(limit: int = 50):
         from psycopg2.extras import RealDictCursor
         c = conn.cursor(cursor_factory=RealDictCursor)
         c.execute("SELECT * FROM windows ORDER BY id DESC LIMIT %s", (limit,))
+        rows = [dict(r) for r in c.fetchall()]
     else:
         c = conn.cursor()
-    c.execute("SELECT * FROM windows ORDER BY id DESC LIMIT ?", (limit,))
-    rows = [dict(r) for r in c.fetchall()]
+        c.execute("SELECT * FROM windows ORDER BY id DESC LIMIT ?", (limit,))
+        rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows
 
@@ -348,8 +349,8 @@ def api_bets(limit: int = 100):
         rows = [dict(r) for r in c.fetchall()]
     else:
         c = conn.cursor()
-    c.execute("SELECT * FROM bets ORDER BY id DESC LIMIT ?", (limit,))
-    rows = [dict(r) for r in c.fetchall()]
+        c.execute("SELECT * FROM bets ORDER BY id DESC LIMIT ?", (limit,))
+        rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows
 
@@ -565,7 +566,7 @@ def api_daily_stats(days: int = 7):
             ORDER BY date DESC
         """, (days,))
     else:
-        # SQLite version
+        # SQLite version (for local dev only)
         c.execute("""
             SELECT 
                 DATE(placed_at) as date,
