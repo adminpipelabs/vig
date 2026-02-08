@@ -6,6 +6,7 @@ import random
 import time
 from datetime import datetime, timezone
 from typing import Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import Config
 from db import Database, BetRecord
@@ -46,57 +47,78 @@ class BetManager:
         random.shuffle(shuffled_candidates)
         logger.info(f"Randomized order of {len(shuffled_candidates)} markets for placement")
         
-        for i, market in enumerate(shuffled_candidates):
-            # Add random delay between orders (2-8 seconds) to avoid detection patterns
-            if i > 0 and not self.config.paper_mode:
-                delay = random.uniform(2.0, 8.0)
-                logger.debug(f"Waiting {delay:.1f}s before next order (randomized)...")
-                import time
-                time.sleep(delay)
+        # Calculate clips upfront for all markets
+        market_clips = []
+        for market in shuffled_candidates:
             base_clip = self.snowball.get_clip_for_market(
                 max_clip_for_volume=market.max_clip or self.config.max_clip)
             clip = base_clip * clip_multiplier
-            if clip < 1.0:
-                continue
-
-            # Check balance before placing bet (live mode only)
-            if not self.config.paper_mode and available_balance is not None:
-                if available_balance < clip:
-                    logger.warning(f"Insufficient balance (${available_balance:.2f}) for clip ${clip:.2f} — stopping this window")
-                    break
-                # Update available balance after each bet
-                available_balance -= clip
-
-            size = clip / market.fav_price
-            bet = BetRecord(
-                window_id=window_id, platform="polymarket",
-                market_id=market.market_id, condition_id=market.condition_id,
-                market_question=market.question, token_id=market.fav_token_id,
-                side=market.fav_side, price=market.fav_price, amount=clip, size=size,
-                placed_at=datetime.now(timezone.utc).isoformat(),
-                result="pending", paper=self.config.paper_mode,
-            )
-
-            if self.config.paper_mode:
-                bet.order_id = f"paper_{window_id}_{market.market_id}"
-                logger.info(f"PAPER: {bet.side} {market.question[:50]} @ ${bet.price:.2f} -- ${bet.amount:.2f}")
-            else:
-                order_id = self._place_live_order(market, clip, size)
-                if not order_id:
-                    # Order failed - check if it's Cloudflare blocking
-                    # If so, stop trying more orders this window to avoid further blocks
-                    error_str = str(getattr(self, '_last_order_error', ''))
-                    if "403" in error_str or "Cloudflare" in error_str:
-                        logger.warning("Cloudflare blocking detected - stopping order placement for this window")
+            if clip >= 1.0:
+                market_clips.append((market, clip))
+        
+        # Check total balance needed
+        total_needed = sum(clip for _, clip in market_clips)
+        if not self.config.paper_mode and available_balance is not None:
+            if available_balance < total_needed:
+                logger.warning(f"Insufficient balance (${available_balance:.2f}) for total ${total_needed:.2f} — limiting bets")
+                # Prioritize markets expiring soon
+                market_clips.sort(key=lambda x: x[0].minutes_to_expiry)
+                # Only take what we can afford
+                affordable = []
+                remaining = available_balance
+                for market, clip in market_clips:
+                    if remaining >= clip:
+                        affordable.append((market, clip))
+                        remaining -= clip
+                    else:
                         break
-                    continue
-                bet.order_id = order_id
-                logger.info(f"LIVE: {bet.side} {market.question[:50]} @ ${bet.price:.2f} -- ${bet.amount:.2f}")
-                # Reset error flag on success
-                self._last_order_error = None
+                market_clips = affordable
+                logger.info(f"Limited to {len(market_clips)} bets based on available balance")
+        
+        # Place bets in parallel (up to 10 concurrent)
+        max_workers = min(10, len(market_clips))  # Cap at 10 parallel bets
+        logger.info(f"Placing {len(market_clips)} bets with {max_workers} parallel workers")
+        
+        def place_single_bet(market_clip_tuple):
+            market, clip = market_clip_tuple
+            try:
+                size = clip / market.fav_price
+                bet = BetRecord(
+                    window_id=window_id, platform="polymarket",
+                    market_id=market.market_id, condition_id=market.condition_id,
+                    market_question=market.question, token_id=market.fav_token_id,
+                    side=market.fav_side, price=market.fav_price, amount=clip, size=size,
+                    placed_at=datetime.now(timezone.utc).isoformat(),
+                    result="pending", paper=self.config.paper_mode,
+                )
 
-            bet.id = self.db.insert_bet(bet)
-            bets.append(bet)
+                if self.config.paper_mode:
+                    bet.order_id = f"paper_{window_id}_{market.market_id}"
+                    logger.info(f"PAPER: {bet.side} {market.question[:50]} @ ${bet.price:.2f} -- ${bet.amount:.2f}")
+                else:
+                    order_id = self._place_live_order(market, clip, size)
+                    if not order_id:
+                        error_str = str(getattr(self, '_last_order_error', ''))
+                        if "403" in error_str or "Cloudflare" in error_str:
+                            logger.warning(f"Cloudflare blocking detected for {market.market_id}")
+                            return None
+                        return None
+                    bet.order_id = order_id
+                    logger.info(f"LIVE: {bet.side} {market.question[:50]} @ ${bet.price:.2f} -- ${bet.amount:.2f}")
+
+                bet.id = self.db.insert_bet(bet)
+                return bet
+            except Exception as e:
+                logger.error(f"Error placing bet on {market.market_id}: {e}")
+                return None
+        
+        # Execute bets in parallel
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(place_single_bet, mc) for mc in market_clips]
+            for future in as_completed(futures):
+                bet = future.result()
+                if bet:
+                    bets.append(bet)
 
         logger.info(f"Placed {len(bets)} bets for window {window_id}")
         return bets
