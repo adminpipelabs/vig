@@ -329,7 +329,7 @@ def api_windows(limit: int = 50):
         c.execute("SELECT * FROM windows ORDER BY id DESC LIMIT %s", (limit,))
     else:
         c = conn.cursor()
-        c.execute("SELECT * FROM windows ORDER BY id DESC LIMIT ?", (limit,))
+    c.execute("SELECT * FROM windows ORDER BY id DESC LIMIT ?", (limit,))
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows
@@ -348,8 +348,8 @@ def api_bets(limit: int = 100):
         rows = [dict(r) for r in c.fetchall()]
     else:
         c = conn.cursor()
-        c.execute("SELECT * FROM bets ORDER BY id DESC LIMIT ?", (limit,))
-        rows = [dict(r) for r in c.fetchall()]
+    c.execute("SELECT * FROM bets ORDER BY id DESC LIMIT ?", (limit,))
+    rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows
 
@@ -363,7 +363,7 @@ def api_pending():
         c.execute("SELECT * FROM bets WHERE result='pending' ORDER BY id DESC")
     else:
         c = conn.cursor()
-        c.execute("SELECT * FROM bets WHERE result='pending' ORDER BY id DESC")
+    c.execute("SELECT * FROM bets WHERE result='pending' ORDER BY id DESC")
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows
@@ -783,88 +783,11 @@ def api_health():
 
 @app.get("/api/test-proxy")
 def api_test_proxy():
-    """Test Bright Data proxy connection - diagnose 403 issues"""
-    import httpx
-    from proxy_init import PROXY_URL
-    
-    results = {
-        "proxy_url": PROXY_URL.split("@")[-1] if "@" in PROXY_URL else "hidden",
-        "tests": []
+    """Proxy test endpoint - no proxy needed"""
+    return {
+        "status": "NO_PROXY",
+        "message": "Bot runs without proxy - no Bright Data needed"
     }
-    
-    # Test 1: Bright Data test endpoint
-    try:
-        client = httpx.Client(proxy=PROXY_URL, trust_env=False, timeout=10.0)
-        resp = client.get("https://lumtest.com/myip.json", timeout=10.0)
-        client.close()
-        if resp.status_code == 200:
-            ip_info = resp.json()
-            results["tests"].append({
-                "test": "Bright Data test endpoint (lumtest.com)",
-                "status": "SUCCESS",
-                "status_code": resp.status_code,
-                "ip": ip_info.get("ip"),
-                "country": ip_info.get("country"),
-                "message": "Proxy authentication works!"
-            })
-        else:
-            results["tests"].append({
-                "test": "Bright Data test endpoint",
-                "status": "FAILED",
-                "status_code": resp.status_code,
-                "response": resp.text[:200],
-                "message": f"Bright Data returned {resp.status_code}"
-            })
-    except httpx.ProxyError as e:
-        results["tests"].append({
-            "test": "Bright Data test endpoint",
-            "status": "PROXY_ERROR",
-            "error": str(e),
-            "message": "Bright Data proxy rejected request (403 = auth/access issue)"
-        })
-    except Exception as e:
-        results["tests"].append({
-            "test": "Bright Data test endpoint",
-            "status": "ERROR",
-            "error": f"{type(e).__name__}: {str(e)}",
-            "message": "Network or configuration issue"
-        })
-    
-    # Test 2: Polymarket CLOB health
-    try:
-        client = httpx.Client(proxy=PROXY_URL, trust_env=False, timeout=10.0)
-        resp = client.get("https://clob.polymarket.com/health", timeout=10.0)
-        client.close()
-        if resp.status_code == 200:
-            results["tests"].append({
-                "test": "Polymarket CLOB health",
-                "status": "SUCCESS",
-                "status_code": resp.status_code,
-                "message": "Can reach Polymarket through proxy!"
-            })
-        else:
-            results["tests"].append({
-                "test": "Polymarket CLOB health",
-                "status": "FAILED",
-                "status_code": resp.status_code,
-                "response": resp.text[:200],
-                "message": f"Polymarket returned {resp.status_code}"
-            })
-    except httpx.ProxyError as e:
-        results["tests"].append({
-            "test": "Polymarket CLOB health",
-            "status": "PROXY_ERROR",
-            "error": str(e),
-            "message": "Proxy rejected request to Polymarket"
-        })
-    except Exception as e:
-        results["tests"].append({
-            "test": "Polymarket CLOB health",
-            "status": "ERROR",
-            "error": f"{type(e).__name__}: {str(e)}"
-        })
-    
-    return results
 
 
 @app.get("/api/debug/status")
@@ -876,7 +799,7 @@ def debug_status():
         "environment": {
             "PAPER_MODE": os.getenv("PAPER_MODE", "not set"),
             "DATABASE_URL_SET": bool(os.getenv("DATABASE_URL")),
-            "RESIDENTIAL_PROXY_SET": bool(os.getenv("RESIDENTIAL_PROXY_URL")),
+            "PROXY_DISABLED": True,
             "RAILWAY_SERVICE_ID": os.getenv("RAILWAY_SERVICE_ID", "not set"),
             "BOT_SERVICE_ID": os.getenv("BOT_SERVICE_ID", "not set"),
             "RAILWAY_TOKEN_SET": bool(os.getenv("RAILWAY_TOKEN")),
@@ -1779,10 +1702,10 @@ async function refresh(){
   netPnlEl.className='card-value '+(netPnl>=0?'positive':'negative');
   
   // Realized P&L (settled bets only)
-  const pnl=stats.total_profit||0;
-  document.getElementById('totalPnl').textContent=fmt(pnl);
-  document.getElementById('totalPnl').className='card-value '+(pnl>=0?'positive':'negative');
-  document.getElementById('totalPnlSub').textContent=(stats.total_bets||0)+' bets | $'+(stats.total_deployed||0).toFixed(0)+' deployed';
+    const pnl=stats.total_profit||0;
+    document.getElementById('totalPnl').textContent=fmt(pnl);
+    document.getElementById('totalPnl').className='card-value '+(pnl>=0?'positive':'negative');
+    document.getElementById('totalPnlSub').textContent=(stats.total_bets||0)+' bets | $'+(stats.total_deployed||0).toFixed(0)+' deployed';
     document.getElementById('winRate').textContent=(stats.win_rate||0).toFixed(1)+'%';
     document.getElementById('winRate').className='card-value '+(stats.win_rate>=85?'positive':stats.win_rate>=80?'neutral':'negative');
     document.getElementById('winRateSub').textContent=(stats.wins||0)+'W '+(stats.losses||0)+'L '+(stats.pending||0)+'P';
