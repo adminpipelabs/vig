@@ -193,23 +193,26 @@ class VigAgent:
         """Scan for new markets and place bets"""
         try:
             # Scan for markets
+            logger.debug(f"[SCAN] Starting market scan (cycle {self.cycle_count})...")
             candidates = self.scanner.scan()
             
             if not candidates:
+                logger.debug(f"[SCAN] No candidates found in scan")
                 return
             
-            logger.info(f"Found {len(candidates)} market candidates")
+            logger.info(f"[SCAN] Found {len(candidates)} market candidates")
             
             # Filter out markets we already have positions in
             new_candidates = [m for m in candidates if m.market_id not in self.open_positions]
             
             if len(new_candidates) < len(candidates):
-                logger.info(f"Filtered out {len(candidates) - len(new_candidates)} markets (already have positions)")
+                logger.info(f"[SCAN] Filtered out {len(candidates) - len(new_candidates)} markets (already have positions)")
             
             if not new_candidates:
+                logger.debug(f"[SCAN] No new candidates after filtering")
                 return
             
-            # Limit to max_bets_per_window (but this is now 100, so rarely hits)
+            # Limit to max_bets_per_window (but this is now 500, so rarely hits)
             to_bet = new_candidates[:self.config.max_bets_per_window]
             
             # Place bets - prioritize markets expiring soon
@@ -218,7 +221,7 @@ class VigAgent:
                 logger.info(f"🚨 {len(expiring_soon)} markets expiring in <30min - prioritizing...")
                 to_bet = expiring_soon + [m for m in to_bet if m not in expiring_soon]
             
-            logger.info(f"Placing bets on {len(to_bet)} new markets...")
+            logger.info(f"[BET] Placing bets on {len(to_bet)} new markets...")
             bets = self.bet_mgr.place_bets(to_bet, self.cycle_count, 1.0)  # clip_multiplier always 1.0
             
             if bets:
@@ -233,8 +236,10 @@ class VigAgent:
                 # Update snowball (but don't wait for settlement)
                 # Settlement happens in next cycle
                 self.snowball.process_window(0, len(bets))  # Profit calculated later
+            else:
+                logger.warning(f"[BET] No bets placed from {len(to_bet)} candidates - check balance/filters")
         except Exception as e:
-            logger.error(f"Error in scan_and_bet: {e}")
+            logger.error(f"[ERROR] Error in scan_and_bet: {e}")
             import traceback
             logger.error(traceback.format_exc())
 

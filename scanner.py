@@ -52,11 +52,11 @@ class Scanner:
         now = datetime.now(timezone.utc)
         window_end = now + timedelta(minutes=self.config.expiry_window_minutes)
 
-        logger.info(f"Scanning for markets expiring between "
+        logger.debug(f"[SCANNER] Scanning for markets expiring between "
                     f"{now.strftime('%H:%M')} and {window_end.strftime('%H:%M')} UTC")
 
         raw_markets = self._fetch_markets(now, window_end)
-        logger.info(f"Gamma API returned {len(raw_markets)} markets in expiry window")
+        logger.info(f"[SCANNER] Gamma API returned {len(raw_markets)} markets in expiry window")
 
         candidates = []
         for market in raw_markets:
