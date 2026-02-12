@@ -149,54 +149,73 @@ def api_wallet_balance():
 
 @app.get("/api/stats")
 def api_stats():
-    conn = get_db()
-    if is_postgres(conn):
-        from psycopg2.extras import RealDictCursor
-        c = conn.cursor(cursor_factory=RealDictCursor)
-    else:
-        c = conn.cursor()
-    c.execute("""
-        SELECT COUNT(*) as total_bets,
-            SUM(CASE WHEN result='won' THEN 1 ELSE 0 END) as wins,
-            SUM(CASE WHEN result='lost' THEN 1 ELSE 0 END) as losses,
-            SUM(CASE WHEN result='pending' THEN 1 ELSE 0 END) as pending,
-            COALESCE(SUM(profit), 0) as total_profit,
-            COALESCE(SUM(payout), 0) as total_payout,
-            COALESCE(SUM(amount), 0) as total_deployed,
-            COALESCE(SUM(CASE WHEN result='pending' THEN amount ELSE 0 END), 0) as pending_locked
-        FROM bets
-    """)
-    row = c.fetchone()
-    stats = dict(row)
+    try:
+        conn = get_db()
+        if is_postgres(conn):
+            from psycopg2.extras import RealDictCursor
+            c = conn.cursor(cursor_factory=RealDictCursor)
+        else:
+            c = conn.cursor()
+        c.execute("""
+            SELECT COUNT(*) as total_bets,
+                SUM(CASE WHEN result='won' THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN result='lost' THEN 1 ELSE 0 END) as losses,
+                SUM(CASE WHEN result='pending' THEN 1 ELSE 0 END) as pending,
+                COALESCE(SUM(profit), 0) as total_profit,
+                COALESCE(SUM(payout), 0) as total_payout,
+                COALESCE(SUM(amount), 0) as total_deployed,
+                COALESCE(SUM(CASE WHEN result='pending' THEN amount ELSE 0 END), 0) as pending_locked
+            FROM bets
+        """)
+        row = c.fetchone()
+        stats = dict(row) if row else {}
     wins = stats.get("wins") or 0
     losses = stats.get("losses") or 0
     resolved = wins + losses
     stats["win_rate"] = (wins / resolved * 100) if resolved > 0 else 0
 
-    c.execute("SELECT * FROM windows ORDER BY id DESC LIMIT 1")
-    last_win_row = c.fetchone()
-    last_win = dict(last_win_row) if last_win_row else None
-    stats["current_clip"] = last_win["clip_size"] if last_win else 10.0
-    stats["current_phase"] = last_win["phase"] if last_win else "growth"
-    stats["last_window_at"] = last_win["started_at"] if last_win else None
+        c.execute("SELECT * FROM windows ORDER BY id DESC LIMIT 1")
+        last_win_row = c.fetchone()
+        last_win = dict(last_win_row) if last_win_row else None
+        stats["current_clip"] = last_win.get("clip_size", 10.0) if last_win else 10.0
+        stats["current_phase"] = last_win.get("phase", "growth") if last_win else "growth"
+        stats["last_window_at"] = last_win.get("started_at") if last_win else None
 
-    c.execute("SELECT COUNT(*) as cnt FROM windows")
-    cnt_row = c.fetchone()
-    stats["total_windows"] = dict(cnt_row)["cnt"] if cnt_row else 0
+        c.execute("SELECT COUNT(*) as cnt FROM windows")
+        cnt_row = c.fetchone()
+        stats["total_windows"] = dict(cnt_row).get("cnt", 0) if cnt_row else 0
 
-    c.execute("SELECT COALESCE(SUM(pocketed), 0) as total_pocketed FROM windows")
-    pocketed_row = c.fetchone()
-    stats["total_pocketed"] = dict(pocketed_row)["total_pocketed"] if pocketed_row else 0.0
+        c.execute("SELECT COALESCE(SUM(pocketed), 0) as total_pocketed FROM windows")
+        pocketed_row = c.fetchone()
+        stats["total_pocketed"] = float(dict(pocketed_row).get("total_pocketed", 0) or 0) if pocketed_row else 0.0
 
-    c.execute("SELECT result FROM bets WHERE result!='pending' ORDER BY id DESC")
-    streak = 0
-    for row in c.fetchall():
-        row_dict = dict(row)
-        if row_dict["result"] == "lost":
-            streak += 1
-        else:
-            break
-    stats["consecutive_losses"] = streak
+        c.execute("SELECT result FROM bets WHERE result!='pending' ORDER BY id DESC")
+        streak = 0
+        for row in c.fetchall():
+            row_dict = dict(row)
+            if row_dict.get("result") == "lost":
+                streak += 1
+            else:
+                break
+        stats["consecutive_losses"] = streak
+        
+        conn.close()
+        return stats
+    except Exception as e:
+        logger.error(f"Error in api_stats: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return {
+            "total_bets": 0,
+            "wins": 0,
+            "losses": 0,
+            "pending": 0,
+            "total_profit": 0,
+            "win_rate": 0,
+            "current_clip": 10.0,
+            "current_phase": "growth",
+            "error": str(e)
+        }
 
     c.execute("SELECT paper FROM bets ORDER BY id DESC LIMIT 1")
     last_bet_row = c.fetchone()
@@ -873,6 +892,16 @@ def api_bot_status():
         # Read bot status from database
         bot_status = db.get_bot_status("main")
         
+        # If no bot status found, return default
+        if not bot_status:
+            return {
+                "status": "unknown",
+                "current_window": "No data",
+                "last_heartbeat": None,
+                "error_message": None,
+                "scan_count": 0
+            }
+        
         # Get last window time for fallback
         last_window = None
         try:
@@ -885,9 +914,11 @@ def api_bot_status():
             
             c.execute("SELECT started_at FROM windows ORDER BY id DESC LIMIT 1")
             last_window_row = c.fetchone()
-            last_window = dict(last_window_row)["started_at"] if last_window_row else None
+            last_window = dict(last_window_row).get("started_at") if last_window_row else None
             conn.close()
         except Exception as e:
+            logger.error(f"Error getting last window: {e}")
+            last_window = None
             logger.warning(f"Could not get last window: {e}")
             if 'conn' in locals() and conn:
                 try:
