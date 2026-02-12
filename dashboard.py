@@ -169,10 +169,10 @@ def api_stats():
         """)
         row = c.fetchone()
         stats = dict(row) if row else {}
-    wins = stats.get("wins") or 0
-    losses = stats.get("losses") or 0
-    resolved = wins + losses
-    stats["win_rate"] = (wins / resolved * 100) if resolved > 0 else 0
+        wins = stats.get("wins") or 0
+        losses = stats.get("losses") or 0
+        resolved = wins + losses
+        stats["win_rate"] = (wins / resolved * 100) if resolved > 0 else 0
 
         c.execute("SELECT * FROM windows ORDER BY id DESC LIMIT 1")
         last_win_row = c.fetchone()
