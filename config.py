@@ -2,10 +2,13 @@
 Vig v1 Configuration
 """
 import os
+import logging
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger("vig.config")
 
 
 @dataclass
@@ -20,8 +23,8 @@ class Config:
     funder_address: str = field(default_factory=lambda: os.getenv("POLYGON_FUNDER_ADDRESS", ""))
     signature_type: int = int(os.getenv("SIGNATURE_TYPE", "0"))
     
-    # Polymarket US API (new)
-    use_us_api: bool = bool(os.getenv("USE_US_API", "true").lower() in ("true", "1", "yes"))
+    # Polymarket US API (new) - defaults to false if keys not provided
+    use_us_api: bool = bool(os.getenv("USE_US_API", "false").lower() in ("true", "1", "yes"))
     polymarket_us_key_id: str = field(default_factory=lambda: os.getenv("POLYMARKET_US_KEY_ID", ""))
     polymarket_us_private_key: str = field(default_factory=lambda: os.getenv("POLYMARKET_US_PRIVATE_KEY", ""))
     
@@ -66,14 +69,16 @@ class Config:
     def validate(self) -> list[str]:
         issues = []
         if not self.paper_mode:
+            # Auto-disable US API if keys not provided
             if self.use_us_api:
-                if not self.polymarket_us_key_id:
-                    issues.append("POLYMARKET_US_KEY_ID required for US API")
-                if not self.polymarket_us_private_key:
-                    issues.append("POLYMARKET_US_PRIVATE_KEY required for US API")
-            else:
+                if not self.polymarket_us_key_id or not self.polymarket_us_private_key:
+                    logger.warning("US API requested but keys not provided - disabling US API, using legacy CLOB API")
+                    self.use_us_api = False
+            
+            # Only require legacy API key if US API is disabled
+            if not self.use_us_api:
                 if not self.private_key:
-                    issues.append("POLYGON_PRIVATE_KEY required for legacy CLOB API")
+                    issues.append("POLYGON_PRIVATE_KEY required for legacy CLOB API (or set USE_US_API=true with US API keys)")
         if self.min_favorite_price >= self.max_favorite_price:
             issues.append("min_favorite_price must be < max_favorite_price")
         if self.max_clip < self.starting_clip:
