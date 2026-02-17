@@ -21,6 +21,6 @@ COPY . .
 # Expose port for dashboard
 EXPOSE 8080
 
-# Railway will use startCommand from railway.json or Procfile
-# Default CMD runs dashboard (Railway can override with Procfile)
-CMD ["uvicorn", "dashboard:app", "--host", "0.0.0.0", "--port", "8080"]
+# Railway uses startCommand from railway.json
+# This CMD is a fallback - Railway should override with startCommand
+CMD uvicorn dashboard:app --host 0.0.0.0 --port ${PORT:-8080}
