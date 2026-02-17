@@ -1,5 +1,12 @@
-[build]
-builder = "nixpacks"
+# Railway configuration for Vig v2
+# Railway will use Procfile to run both services:
+# - web: python3 dashboard.py (dashboard on port 8080)
+# - worker: python3 main.py (bot)
 
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+# If Railway doesn't auto-detect Procfile, use these:
 [deploy]
-startCommand = "/bin/sh -c \"uvicorn dashboard:app --host 0.0.0.0 --port \\$PORT\""
+startCommand = "python3 main.py"
