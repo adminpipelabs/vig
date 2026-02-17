@@ -8,6 +8,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Depends
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import httpx
 import logging
 
@@ -25,6 +26,15 @@ logging.getLogger("hpack").setLevel(logging.WARNING)
 logger = logging.getLogger("vig.dashboard")
 
 app = FastAPI(title="Vig Dashboard")
+
+# CORS for live updates
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Import security modules
 from api_security import (
@@ -1282,6 +1292,323 @@ def api_scan():
     }
 
 
+# ─── Live Terminal API Endpoints ────────────────────────────────────────────
+
+@app.get("/api/live/markets")
+async def api_live_markets():
+    """Get live markets being scanned/traded"""
+    try:
+        conn = get_db()
+        # Get recent bets (last 30 minutes) to show which markets are being traded
+        # Note: placed_at is stored as TEXT (ISO format), so we compare as strings or convert
+        # For simplicity, get last 50 bets and filter in Python (more reliable)
+        try:
+            query = """
+                SELECT DISTINCT market_question, side, price, market_id, placed_at
+                FROM bets
+                ORDER BY placed_at DESC
+                LIMIT 50
+            """
+            c = conn.cursor()
+            c.execute(query)
+            rows = c.fetchall()
+        except Exception as db_error:
+            logger.warning(f"Database query failed (table might not exist yet): {db_error}")
+            rows = []
+        finally:
+            try:
+                conn.close()
+            except:
+                pass
+        
+        # Filter to last 30 minutes
+        from datetime import datetime, timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+        
+        markets = []
+        for row in rows:
+            # Handle both dict-like (PostgreSQL RealDictRow) and tuple-like (SQLite Row)
+            if isinstance(row, dict):
+                market_question = row.get("market_question", "")
+                side = row.get("side", "")
+                price = float(row.get("price", 0))
+                market_id = row.get("market_id", "")
+                placed_at_str = row.get("placed_at", "")
+            else:
+                market_question = row[0] if len(row) > 0 else ""
+                side = row[1] if len(row) > 1 else ""
+                price = float(row[2]) if len(row) > 2 else 0.0
+                market_id = row[3] if len(row) > 3 else ""
+                placed_at_str = row[4] if len(row) > 4 else ""
+            
+            # Parse placed_at and filter by time
+            try:
+                if placed_at_str:
+                    placed_at_dt = datetime.fromisoformat(placed_at_str.replace('Z', '+00:00'))
+                    if placed_at_dt < cutoff:
+                        continue
+            except:
+                pass  # Include if we can't parse
+            
+            markets.append({
+                "market_question": market_question,
+                "side": side,
+                "price": price,
+                "market_id": market_id,
+                "placed_at": placed_at_str,
+            })
+        
+        return {"markets": markets, "count": len(markets)}
+    except Exception as e:
+        logger.error(f"Error fetching live markets: {e}")
+        return {"markets": [], "count": 0, "error": str(e)}
+
+
+@app.get("/api/live/positions")
+async def api_live_positions():
+    """Get open positions with live P&L"""
+    try:
+        conn = get_db()
+        # Get pending bets (open positions)
+        try:
+            query = """
+                SELECT market_question, side, price, amount, placed_at, market_id, result
+                FROM bets
+                WHERE result = 'pending'
+                ORDER BY placed_at DESC
+            """
+            c = conn.cursor()
+            c.execute(query)
+            rows = c.fetchall()
+        except Exception as db_error:
+            logger.warning(f"Database query failed (table might not exist yet): {db_error}")
+            rows = []
+        finally:
+            try:
+                conn.close()
+            except:
+                pass
+        
+        positions = []
+        for row in rows:
+            # Handle both dict-like (PostgreSQL RealDictRow) and tuple-like (SQLite Row)
+            if isinstance(row, dict):
+                market_question = row.get("market_question", "")
+                side = row.get("side", "")
+                price = float(row.get("price", 0))
+                amount = float(row.get("amount", 0))
+                placed_at = row.get("placed_at", "")
+            else:
+                market_question = row[0] if len(row) > 0 else ""
+                side = row[1] if len(row) > 1 else ""
+                price = float(row[2]) if len(row) > 2 else 0.0
+                amount = float(row[3]) if len(row) > 3 else 0.0
+                placed_at = row[4] if len(row) > 4 else ""
+            
+            # Calculate unrealized P&L (simplified - assume current price = entry price for now)
+            # In production, you'd fetch current market price
+            positions.append({
+                "market_question": market_question,
+                "market": market_question,
+                "side": side,
+                "entry_price": price,
+                "price": price,
+                "amount": amount,
+                "pnl": 0.0,  # Would calculate from current market price
+                "profit": 0.0,
+                "status": "open",
+                "placed_at": placed_at,
+            })
+        
+        return {"positions": positions, "count": len(positions)}
+    except Exception as e:
+        logger.error(f"Error fetching live positions: {e}")
+        return {"positions": [], "count": 0, "error": str(e)}
+
+
+@app.get("/api/live/activity")
+async def api_live_activity():
+    """Get recent trading activity"""
+    try:
+        conn = get_db()
+        # Get recent bets (last 50)
+        try:
+            query = """
+                SELECT market_question, side, price, amount, placed_at, result, profit, market_id
+                FROM bets
+                ORDER BY placed_at DESC
+                LIMIT 50
+            """
+            c = conn.cursor()
+            c.execute(query)
+            rows = c.fetchall()
+        except Exception as db_error:
+            logger.warning(f"Database query failed (table might not exist yet): {db_error}")
+            rows = []
+        finally:
+            try:
+                conn.close()
+            except:
+                pass
+        
+        activity = []
+        for row in rows:
+            # Handle both dict-like (PostgreSQL RealDictRow) and tuple-like (SQLite Row)
+            if isinstance(row, dict):
+                market_question = row.get("market_question", "")
+                side = row.get("side", "")
+                price = float(row.get("price", 0))
+                amount = float(row.get("amount", 0))
+                placed_at = row.get("placed_at", "")
+                result = row.get("result", "pending")
+                profit = float(row.get("profit", 0))
+            else:
+                market_question = row[0] if len(row) > 0 else ""
+                side = row[1] if len(row) > 1 else ""
+                price = float(row[2]) if len(row) > 2 else 0.0
+                amount = float(row[3]) if len(row) > 3 else 0.0
+                placed_at = row[4] if len(row) > 4 else ""
+                result = row[5] if len(row) > 5 else "pending"
+                profit = float(row[6]) if len(row) > 6 else 0.0
+            
+            activity.append({
+                "market_question": market_question,
+                "market": market_question,
+                "side": side,
+                "type": "buy" if result == "pending" else ("sell" if result == "won" else "settle"),
+                "price": price,
+                "amount": amount,
+                "pnl": profit,
+                "result": result,
+                "placed_at": placed_at,
+                "timestamp": placed_at,
+            })
+        
+        return {"activity": activity, "count": len(activity)}
+    except Exception as e:
+        logger.error(f"Error fetching live activity: {e}")
+        return {"activity": [], "count": 0, "error": str(e)}
+
+
+@app.get("/api/live/stats")
+async def api_live_stats():
+    """Get live stats (P&L, win rate, etc.)"""
+    try:
+        # Reuse existing stats endpoint logic
+        conn = get_db()
+        
+        # Get basic stats
+        if is_postgres(conn):
+            total_bets_query = "SELECT COUNT(*) as cnt FROM bets"
+            total_profit_query = "SELECT COALESCE(SUM(profit), 0) as total FROM bets WHERE result IN ('won', 'lost')"
+            wins_query = "SELECT COUNT(*) as cnt FROM bets WHERE result = 'won'"
+            losses_query = "SELECT COUNT(*) as cnt FROM bets WHERE result = 'lost'"
+            pending_query = "SELECT COUNT(*) as cnt FROM bets WHERE result = 'pending'"
+            cash_query = "SELECT COALESCE(SUM(amount), 0) as total FROM bets WHERE result = 'pending'"
+        else:
+            total_bets_query = "SELECT COUNT(*) as cnt FROM bets"
+            total_profit_query = "SELECT COALESCE(SUM(profit), 0) as total FROM bets WHERE result IN ('won', 'lost')"
+            wins_query = "SELECT COUNT(*) as cnt FROM bets WHERE result = 'won'"
+            losses_query = "SELECT COUNT(*) as cnt FROM bets WHERE result = 'lost'"
+            pending_query = "SELECT COUNT(*) as cnt FROM bets WHERE result = 'pending'"
+            cash_query = "SELECT COALESCE(SUM(amount), 0) as total FROM bets WHERE result = 'pending'"
+        
+        c = conn.cursor()
+        
+        try:
+            c.execute(total_bets_query)
+            total_bets_row = c.fetchone()
+            total_bets = total_bets_row[0] if total_bets_row else 0
+            if isinstance(total_bets_row, dict):
+                total_bets = total_bets_row.get("cnt", 0)
+            
+            c.execute(total_profit_query)
+            total_profit_row = c.fetchone()
+            total_profit = float(total_profit_row[0] if total_profit_row else 0)
+            if isinstance(total_profit_row, dict):
+                total_profit = float(total_profit_row.get("total", 0))
+            
+            c.execute(wins_query)
+            wins_row = c.fetchone()
+            wins = wins_row[0] if wins_row else 0
+            if isinstance(wins_row, dict):
+                wins = wins_row.get("cnt", 0)
+            
+            c.execute(losses_query)
+            losses_row = c.fetchone()
+            losses = losses_row[0] if losses_row else 0
+            if isinstance(losses_row, dict):
+                losses = losses_row.get("cnt", 0)
+            
+            c.execute(pending_query)
+            pending_row = c.fetchone()
+            open_positions = pending_row[0] if pending_row else 0
+            if isinstance(pending_row, dict):
+                open_positions = pending_row.get("cnt", 0)
+            
+            c.execute(cash_query)
+            cash_row = c.fetchone()
+            locked_cash = float(cash_row[0] if cash_row else 0)
+            if isinstance(cash_row, dict):
+                locked_cash = float(cash_row.get("total", 0))
+        except Exception as db_error:
+            logger.warning(f"Database query failed (table might not exist yet): {db_error}")
+            total_bets = 0
+            total_profit = 0.0
+            wins = 0
+            losses = 0
+            open_positions = 0
+            locked_cash = 0.0
+        
+        # Get bot status
+        bot_status = "unknown"
+        try:
+            if is_postgres(conn):
+                status_query = "SELECT status FROM bot_status ORDER BY updated_at DESC LIMIT 1"
+            else:
+                status_query = "SELECT status FROM bot_status ORDER BY updated_at DESC LIMIT 1"
+            c.execute(status_query)
+            status_row = c.fetchone()
+            if status_row:
+                bot_status = status_row[0] if isinstance(status_row, dict) else status_row.get("status", "unknown")
+        except:
+            pass
+        
+        try:
+            conn.close()
+        except:
+            pass
+        
+        win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
+        
+        return {
+            "total_pnl": total_profit,
+            "net_pnl": total_profit,
+            "win_rate": win_rate,
+            "open_positions": open_positions,
+            "current_cash": 100.0 - locked_cash,  # Simplified - would get from actual balance
+            "cash_balance": 100.0 - locked_cash,
+            "status": bot_status,
+            "bot_status": bot_status,
+            "wins": wins,
+            "losses": losses,
+            "total_bets": total_bets,
+        }
+    except Exception as e:
+        logger.error(f"Error fetching live stats: {e}")
+        return {
+            "total_pnl": 0,
+            "net_pnl": 0,
+            "win_rate": 0,
+            "open_positions": 0,
+            "current_cash": 0,
+            "cash_balance": 0,
+            "status": "error",
+            "bot_status": "error",
+            "error": str(e),
+        }
+
+
 # ─── Dashboard HTML ────────────────────────────────────────────
 
 @app.get("/pnl", response_class=HTMLResponse)
@@ -1290,6 +1617,254 @@ def pnl_page():
     return """<!DOCTYPE html>
 <html><body><h1>P&L Flow</h1><p>Coming soon - will show detailed P&L flow</p></body></html>"""
 
+
+# ─── Trading Terminal HTML ────────────────────────────────────────────
+
+TERMINAL_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vig Trading Terminal</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0a0b0e; --surface: #12131a; --surface2: #1a1c25;
+  --border: #252833; --text: #e4e6ed; --text-dim: #6b7084;
+  --green: #00e676; --green-dim: rgba(0,230,118,0.12);
+  --red: #ff5252; --red-dim: rgba(255,82,82,0.12);
+  --blue: #448aff; --blue-dim: rgba(68,138,255,0.12);
+  --cyan: #18ffff; --cyan-dim: rgba(24,255,255,0.12);
+  --font-mono: 'JetBrains Mono', monospace;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:var(--bg); color:var(--text); font-family:var(--font-mono); font-size:12px; line-height:1.5; overflow:hidden; }
+.header { display:flex; align-items:center; justify-content:space-between; padding:12px 20px; border-bottom:1px solid var(--border); background:var(--surface); }
+.logo { font-size:18px; font-weight:700; }
+.logo span { color:var(--green); }
+.status-badge { display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:16px; font-size:10px; font-weight:500; }
+.status-badge.live { background:var(--green-dim); color:var(--green); }
+.status-badge.offline { background:var(--red-dim); color:var(--red); }
+.status-dot { width:6px; height:6px; border-radius:50%; background:currentColor; animation:pulse 2s ease-in-out infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+.container { display:grid; grid-template-columns:1fr 1fr; grid-template-rows:auto 1fr auto; gap:12px; padding:12px; height:calc(100vh - 50px); }
+.panel { background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:12px; overflow:hidden; display:flex; flex-direction:column; }
+.panel-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; font-size:10px; text-transform:uppercase; letter-spacing:1px; color:var(--text-dim); font-weight:600; }
+.panel-content { flex:1; overflow-y:auto; }
+.stats-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-bottom:12px; }
+.stat { background:var(--surface2); padding:8px; border-radius:4px; }
+.stat-label { font-size:9px; color:var(--text-dim); text-transform:uppercase; margin-bottom:4px; }
+.stat-value { font-size:16px; font-weight:600; }
+.stat-value.positive { color:var(--green); }
+.stat-value.negative { color:var(--red); }
+table { width:100%; border-collapse:collapse; font-size:11px; }
+th { text-align:left; padding:6px 8px; font-size:9px; text-transform:uppercase; color:var(--text-dim); font-weight:600; border-bottom:1px solid var(--border); position:sticky; top:0; background:var(--surface); }
+td { padding:6px 8px; border-bottom:1px solid var(--border); }
+tr:hover td { background:rgba(255,255,255,0.02); }
+.tag { display:inline-block; padding:2px 6px; border-radius:3px; font-size:9px; font-weight:600; }
+.tag.yes { background:var(--green-dim); color:var(--green); }
+.tag.no { background:var(--red-dim); color:var(--red); }
+.tag.open { background:var(--blue-dim); color:var(--blue); }
+.tag.won { background:var(--green-dim); color:var(--green); }
+.tag.lost { background:var(--red-dim); color:var(--red); }
+.tag.pending { background:var(--surface2); color:var(--text-dim); }
+.footer { grid-column:1/-1; padding:8px 20px; border-top:1px solid var(--border); background:var(--surface); font-size:10px; color:var(--text-dim); display:flex; justify-content:space-between; }
+.market-name { max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.activity-item { padding:6px 0; border-bottom:1px solid var(--border); font-size:11px; }
+.activity-item:last-child { border-bottom:none; }
+.time { color:var(--text-dim); font-size:9px; }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="logo">V<span>ig</span> Terminal</div>
+  <div class="status-badge offline" id="statusBadge"><div class="status-dot"></div><span id="statusText">Loading...</span></div>
+</div>
+<div class="container">
+  <div class="panel" style="grid-column:1/-1;">
+    <div class="panel-header">Live Stats</div>
+    <div class="stats-grid">
+      <div class="stat"><div class="stat-label">Total P&L</div><div class="stat-value" id="totalPnl">--</div></div>
+      <div class="stat"><div class="stat-label">Win Rate</div><div class="stat-value" id="winRate">--</div></div>
+      <div class="stat"><div class="stat-label">Open Positions</div><div class="stat-value" id="openPositions">--</div></div>
+      <div class="stat"><div class="stat-label">Cash Balance</div><div class="stat-value" id="cashBalance">--</div></div>
+    </div>
+  </div>
+  <div class="panel">
+    <div class="panel-header">Live Markets</div>
+    <div class="panel-content">
+      <table id="marketsTable">
+        <thead><tr><th>Market</th><th>Side</th><th>Price</th><th>Expiry</th></tr></thead>
+        <tbody><tr><td colspan="4" style="text-align:center;padding:20px;color:var(--text-dim);">Loading markets...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="panel">
+    <div class="panel-header">Open Positions</div>
+    <div class="panel-content">
+      <table id="positionsTable">
+        <thead><tr><th>Market</th><th>Side</th><th>Entry</th><th>P&L</th><th>Status</th></tr></thead>
+        <tbody><tr><td colspan="5" style="text-align:center;padding:20px;color:var(--text-dim);">No open positions</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="panel" style="grid-column:1/-1;">
+    <div class="panel-header">Recent Activity</div>
+    <div class="panel-content" id="activityList">
+      <div style="text-align:center;padding:20px;color:var(--text-dim);">Loading activity...</div>
+    </div>
+  </div>
+</div>
+<div class="footer">
+  <span>Last update: <span id="lastUpdate">--</span></span>
+  <span>Auto-refresh: <span id="refreshCountdown">2s</span></span>
+</div>
+<script>
+let refreshInterval;
+let countdown = 2;
+
+async function fetchJSON(url) {
+  try {
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    return await r.json();
+  } catch(e) {
+    console.error(`Fetch error: ${url}`, e);
+    return null;
+  }
+}
+
+function fmt(n) {
+  if (n == null) return '--';
+  const sign = n >= 0 ? '+' : '';
+  return sign + '$' + Math.abs(n).toFixed(2);
+}
+
+function timeAgo(iso) {
+  if (!iso) return '--';
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (s < 60) return Math.floor(s) + 's ago';
+  if (s < 3600) return Math.floor(s/60) + 'm ago';
+  return Math.floor(s/3600) + 'h ago';
+}
+
+function updateMarkets(data) {
+  const tbody = document.querySelector('#marketsTable tbody');
+  if (!data || !data.markets || data.markets.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:20px;color:var(--text-dim);">No markets being scanned</td></tr>';
+    return;
+  }
+  let html = '';
+  for (const m of data.markets.slice(0, 20)) {
+    const name = (m.question || m.market_question || '').substring(0, 40) + '...';
+    html += '<tr>';
+    html += '<td class="market-name" title="' + (m.question || m.market_question || '') + '">' + name + '</td>';
+    html += '<td><span class="tag ' + (m.side === 'YES' ? 'yes' : 'no') + '">' + (m.side || '--') + '</span></td>';
+    html += '<td>$' + (m.price || 0).toFixed(2) + '</td>';
+    html += '<td>' + (m.minutes_to_expiry || '--') + 'm</td>';
+    html += '</tr>';
+  }
+  tbody.innerHTML = html;
+}
+
+function updatePositions(data) {
+  const tbody = document.querySelector('#positionsTable tbody');
+  if (!data || !data.positions || data.positions.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:20px;color:var(--text-dim);">No open positions</td></tr>';
+    return;
+  }
+  let html = '';
+  for (const p of data.positions) {
+    const name = (p.market_question || p.market || '').substring(0, 30) + '...';
+    const pnl = p.pnl || p.profit || 0;
+    html += '<tr>';
+    html += '<td class="market-name" title="' + (p.market_question || p.market || '') + '">' + name + '</td>';
+    html += '<td><span class="tag ' + (p.side === 'YES' ? 'yes' : 'no') + '">' + (p.side || '--') + '</span></td>';
+    html += '<td>$' + (p.entry_price || p.price || 0).toFixed(2) + '</td>';
+    html += '<td class="stat-value ' + (pnl >= 0 ? 'positive' : 'negative') + '">' + fmt(pnl) + '</td>';
+    html += '<td><span class="tag ' + (p.status || 'open') + '">' + (p.status || 'open').toUpperCase() + '</span></td>';
+    html += '</tr>';
+  }
+  tbody.innerHTML = html;
+}
+
+function updateActivity(data) {
+  const el = document.getElementById('activityList');
+  if (!data || !data.activity || data.activity.length === 0) {
+    el.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-dim);">No recent activity</div>';
+    return;
+  }
+  let html = '';
+  for (const a of data.activity.slice(0, 15)) {
+    const name = (a.market_question || a.market || '').substring(0, 50) + '...';
+    html += '<div class="activity-item">';
+    html += '<div style="display:flex;justify-content:space-between;margin-bottom:4px;">';
+    html += '<span><span class="tag ' + (a.type === 'buy' ? 'yes' : a.type === 'sell' ? 'no' : 'pending') + '">' + (a.type || 'bet').toUpperCase() + '</span> ' + name + '</span>';
+    html += '<span class="stat-value ' + (a.pnl >= 0 ? 'positive' : 'negative') + '">' + fmt(a.pnl || a.amount || 0) + '</span>';
+    html += '</div>';
+    html += '<div class="time">' + timeAgo(a.timestamp || a.placed_at) + '</div>';
+    html += '</div>';
+  }
+  el.innerHTML = html;
+}
+
+function updateStats(data) {
+  if (!data) return;
+  const pnl = data.total_pnl || data.net_pnl || 0;
+  document.getElementById('totalPnl').textContent = fmt(pnl);
+  document.getElementById('totalPnl').className = 'stat-value ' + (pnl >= 0 ? 'positive' : 'negative');
+  document.getElementById('winRate').textContent = (data.win_rate || 0).toFixed(1) + '%';
+  document.getElementById('openPositions').textContent = data.open_positions || 0;
+  document.getElementById('cashBalance').textContent = fmt(data.current_cash || data.cash_balance || 0);
+  
+  const badge = document.getElementById('statusBadge');
+  const statusText = document.getElementById('statusText');
+  if (data.status === 'running' || data.bot_status === 'running') {
+    badge.className = 'status-badge live';
+    statusText.textContent = 'Live';
+  } else {
+    badge.className = 'status-badge offline';
+    statusText.textContent = 'Offline';
+  }
+}
+
+async function refresh() {
+  const [markets, positions, activity, stats] = await Promise.all([
+    fetchJSON('/api/live/markets'),
+    fetchJSON('/api/live/positions'),
+    fetchJSON('/api/live/activity'),
+    fetchJSON('/api/live/stats')
+  ]);
+  
+  if (markets) updateMarkets(markets);
+  if (positions) updatePositions(positions);
+  if (activity) updateActivity(activity);
+  if (stats) updateStats(stats);
+  
+  document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+}
+
+function startRefresh() {
+  refresh();
+  refreshInterval = setInterval(() => {
+    countdown--;
+    document.getElementById('refreshCountdown').textContent = countdown + 's';
+    if (countdown <= 0) {
+      countdown = 2;
+      refresh();
+    }
+  }, 1000);
+}
+
+startRefresh();
+</script>
+</body>
+</html>"""
+
+@app.get("/terminal", response_class=HTMLResponse)
+def terminal():
+    """Trading Terminal UI - Live markets and P&L"""
+    return TERMINAL_HTML
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
@@ -1305,7 +1880,7 @@ def dashboard():
         return html_template
     except ImportError:
         # Fallback: return basic message if template not found
-        return f"""<!DOCTYPE html><html><body><h1>Dashboard Loading...</h1><p>Template not found. Wallet: {wallet_address}</p></body></html>"""
+        return f"""<!DOCTYPE html><html><body><h1>Dashboard Loading...</h1><p>Template not found. Wallet: {wallet_address}</p><p><a href="/terminal">Go to Trading Terminal</a></p></body></html>"""
 
 
 @app.get("/pnl", response_class=HTMLResponse)
