@@ -21,6 +21,6 @@ COPY . .
 # Expose port for dashboard
 EXPOSE 8080
 
-# Railway will use Procfile to run services
-# Procfile defines: web (uvicorn dashboard:app) and worker (python3 main.py)
-# No CMD needed - Railway uses Procfile
+# Railway will use startCommand from railway.json or Procfile
+# Default CMD runs dashboard (Railway can override with Procfile)
+CMD ["uvicorn", "dashboard:app", "--host", "0.0.0.0", "--port", "8080"]
