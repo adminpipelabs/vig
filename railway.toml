@@ -1,12 +1,10 @@
 # Railway configuration for Vig v2
-# Railway will use Procfile to run both services:
-# - web: python3 dashboard.py (dashboard on port 8080)
-# - worker: python3 main.py (bot)
+# Railway uses railway.json for configuration
+# This file is kept for reference but railway.json takes precedence
 
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
-# If Railway doesn't auto-detect Procfile, use these:
-[deploy]
-startCommand = "python3 main.py"
+# Note: startCommand is set in railway.json, not here
+# railway.json: "uvicorn dashboard:app --host 0.0.0.0 --port $PORT"

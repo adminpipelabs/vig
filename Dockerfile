@@ -21,6 +21,6 @@ COPY . .
 # Expose port for dashboard
 EXPOSE 8080
 
-# Railway uses startCommand from railway.json
-# This CMD is a fallback - Railway should override with startCommand
-CMD uvicorn dashboard:app --host 0.0.0.0 --port ${PORT:-8080}
+# Railway uses startCommand from railway.json: "uvicorn dashboard:app --host 0.0.0.0 --port $PORT"
+# This CMD is fallback only - Railway should override with startCommand from railway.json
+CMD ["uvicorn", "dashboard:app", "--host", "0.0.0.0", "--port", "8080"]
