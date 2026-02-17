@@ -21,6 +21,6 @@ COPY . .
 # Expose port for dashboard
 EXPOSE 8080
 
-# Use Procfile for process management (Railway will handle this)
-# Or run both services if Railway doesn't split
-CMD python3 main.py
+# Railway will use Procfile to run services
+# Procfile defines: web (uvicorn dashboard:app) and worker (python3 main.py)
+# No CMD needed - Railway uses Procfile
