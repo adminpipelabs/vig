@@ -26,7 +26,9 @@ from scanner import Scanner
 from snowball import Snowball
 from risk_manager import RiskManager
 from bet_manager import BetManager
+from bet_manager_us import BetManagerUS
 from notifier import Notifier
+from positions import PositionTracker
 
 # Suppress verbose HTTP/2 and HPACK debug logs
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -50,8 +52,8 @@ class VigAgent:
     """Always-on trading agent - watches markets continuously"""
     
     def __init__(self, config: Config, db: Database, scanner: Scanner, 
-                 bet_mgr: BetManager, snowball: Snowball, risk_mgr: RiskManager,
-                 notifier: Notifier, clob_client=None):
+                 bet_mgr, snowball: Snowball, risk_mgr: RiskManager,
+                 notifier: Notifier, position_tracker: PositionTracker, clob_client=None):
         self.config = config
         self.db = db
         self.scanner = scanner
@@ -59,9 +61,10 @@ class VigAgent:
         self.snowball = snowball
         self.risk_mgr = risk_mgr
         self.notifier = notifier
+        self.position_tracker = position_tracker
         self.clob_client = clob_client
         
-        # Track open positions to avoid duplicate bets
+        # Track open positions to avoid duplicate bets (by market slug for US API)
         self.open_positions: Set[str] = set()
         self._load_open_positions()
         
@@ -72,8 +75,14 @@ class VigAgent:
     def _load_open_positions(self):
         """Load open positions from database on startup"""
         pending = self.db.get_all_pending_bets()
-        self.open_positions = {bet.market_id for bet in pending}
-        logger.info(f"Loaded {len(self.open_positions)} open positions from database")
+        if self.config.use_us_api:
+            # For US API, we need to map market_id to slug
+            # This is a simplified version - ideally we'd store slug in DB
+            self.open_positions = set()  # Will be populated as we scan
+            logger.info(f"Loaded {len(pending)} pending bets (US API - positions tracked separately)")
+        else:
+            self.open_positions = {bet.market_id for bet in pending}
+            logger.info(f"Loaded {len(self.open_positions)} open positions from database")
     
     def run(self):
         """Main agent loop - runs continuously"""
@@ -93,12 +102,16 @@ class VigAgent:
                 # Update heartbeat
                 self.db.update_bot_status("main", "running", f"Cycle {self.cycle_count}")
                 
-                # 1. Check and settle resolved positions
-                self._check_and_settle_positions()
+                # 1. Check profit targets (US API only)
+                if self.config.use_us_api and isinstance(self.bet_mgr, BetManagerUS):
+                    self.bet_mgr.check_profit_targets()
+                    self.bet_mgr.check_and_close_positions()
                 
-                # 2. Check and redeem winners (if live mode)
-                if not self.config.paper_mode:
-                    self._check_and_redeem_winners()
+                # 2. Check and settle resolved positions (legacy CLOB API)
+                if not self.config.use_us_api:
+                    self._check_and_settle_positions()
+                    if not self.config.paper_mode:
+                        self._check_and_redeem_winners()
                 
                 # 3. Scan for new opportunities
                 self._scan_and_bet()
@@ -120,6 +133,10 @@ class VigAgent:
         
         logger.info("Vig Agent shutting down.")
         self.db.update_bot_status("main", "stopped", None, "Agent stopped")
+        
+        # Cleanup
+        if isinstance(self.bet_mgr, BetManagerUS):
+            self.bet_mgr.close()
         self.scanner.close()
         self.db.close()
     
@@ -202,8 +219,11 @@ class VigAgent:
             
             logger.info(f"[SCAN] Found {len(candidates)} market candidates")
             
-            # Filter out markets we already have positions in
-            new_candidates = [m for m in candidates if m.market_id not in self.open_positions]
+            # Filter out markets we already have positions in (use slug for US API, market_id for legacy)
+            if self.config.use_us_api:
+                new_candidates = [m for m in candidates if m.slug not in self.open_positions]
+            else:
+                new_candidates = [m for m in candidates if m.market_id not in self.open_positions]
             
             if len(new_candidates) < len(candidates):
                 logger.info(f"[SCAN] Filtered out {len(candidates) - len(new_candidates)} markets (already have positions)")
@@ -225,9 +245,15 @@ class VigAgent:
             bets = self.bet_mgr.place_bets(to_bet, self.cycle_count, 1.0)  # clip_multiplier always 1.0
             
             if bets:
-                # Add to open positions
+                # Add to open positions (use slug for US API, market_id for legacy)
                 for bet in bets:
-                    self.open_positions.add(bet.market_id)
+                    if self.config.use_us_api:
+                        # Find market slug from candidate
+                        market = next((m for m in to_bet if m.market_id == bet.market_id), None)
+                        if market:
+                            self.open_positions.add(market.slug)
+                    else:
+                        self.open_positions.add(bet.market_id)
                 
                 total_deployed = sum(b.amount for b in bets)
                 expiring_bets = sum(1 for b in bets if any(m.minutes_to_expiry < 30 for m in to_bet if m.market_id == b.market_id))
@@ -264,11 +290,11 @@ def main():
     risk_mgr = RiskManager(config, db)
     notifier = Notifier(config)
     
-    # CLOB client only for live mode
+    # CLOB client only for legacy API (not US API)
     clob_client = None
-    if not config.paper_mode:
+    if not config.use_us_api and not config.paper_mode:
         try:
-            logger.info("Initializing CLOB client...")
+            logger.info("Initializing legacy CLOB client...")
             from py_clob_client.client import ClobClient
             
             host = config.clob_url
@@ -285,7 +311,15 @@ def main():
             logger.error("Bot will run in SCAN-ONLY mode")
             clob_client = None
     
-    bet_mgr = BetManager(config, db, snowball, clob_client)
+    # ── Initialize bet manager (US API or legacy) ──
+    position_tracker = PositionTracker()
+    
+    if config.use_us_api and not config.paper_mode:
+        bet_mgr = BetManagerUS(config, db, snowball, position_tracker)
+        logger.info("Using Polymarket US API")
+    else:
+        bet_mgr = BetManager(config, db, snowball, clob_client)
+        logger.info("Using legacy CLOB API")
     
     # ── Restore state ──
     recent_windows = db.get_recent_windows(1)
@@ -303,7 +337,7 @@ def main():
         logger.info(f"Fresh start: clip=${config.starting_clip:.2f}")
     
     # ── Start agent ──
-    agent = VigAgent(config, db, scanner, bet_mgr, snowball, risk_mgr, notifier, clob_client)
+    agent = VigAgent(config, db, scanner, bet_mgr, snowball, risk_mgr, notifier, position_tracker, clob_client)
     agent.run()
 
 
