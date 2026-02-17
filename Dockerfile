@@ -12,6 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install cryptography explicitly (required for Ed25519)
+RUN pip install --no-cache-dir cryptography>=41.0.0
+
 # Copy application code
 COPY . .
 
