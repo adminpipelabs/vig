@@ -1,0 +1,230 @@
+"""
+Vig v2 — Polymarket US API Order Functions
+"""
+import httpx
+import logging
+from typing import Dict, Optional, List
+from auth import PolymarketUSAuth
+
+logger = logging.getLogger("vig.orders")
+
+BASE_URL = "https://api.polymarket.us"
+
+# Order types
+ORDER_TYPE_LIMIT = "ORDER_TYPE_LIMIT"
+ORDER_TYPE_MARKET = "ORDER_TYPE_MARKET"
+
+# Order intents
+ORDER_INTENT_BUY_LONG = "ORDER_INTENT_BUY_LONG"
+ORDER_INTENT_SELL_LONG = "ORDER_INTENT_SELL_LONG"
+ORDER_INTENT_BUY_SHORT = "ORDER_INTENT_BUY_SHORT"
+ORDER_INTENT_SELL_SHORT = "ORDER_INTENT_SELL_SHORT"
+
+# Time in force
+TIME_IN_FORCE_GOOD_TILL_CANCEL = "TIME_IN_FORCE_GOOD_TILL_CANCEL"
+TIME_IN_FORCE_GOOD_TILL_DATE = "TIME_IN_FORCE_GOOD_TILL_DATE"
+TIME_IN_FORCE_IMMEDIATE_OR_CANCEL = "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"
+TIME_IN_FORCE_FILL_OR_KILL = "TIME_IN_FORCE_FILL_OR_KILL"
+
+MANUAL_ORDER_INDICATOR_AUTOMATIC = "MANUAL_ORDER_INDICATOR_AUTOMATIC"
+
+
+class PolymarketUSOrders:
+    """Order management for Polymarket US API"""
+    
+    def __init__(self, auth: PolymarketUSAuth):
+        self.auth = auth
+        self.client = httpx.Client(timeout=30.0)
+    
+    def place_order(
+        self,
+        market_slug: str,
+        intent: str,
+        price: float,
+        quantity: int,
+        order_type: str = ORDER_TYPE_LIMIT,
+        tif: str = TIME_IN_FORCE_GOOD_TILL_CANCEL,
+        slippage_tolerance: Optional[Dict] = None
+    ) -> Optional[Dict]:
+        """
+        Place order via US API.
+        
+        Args:
+            market_slug: Market slug (e.g., "nyc-temp-above-50-feb-17")
+            intent: ORDER_INTENT_BUY_LONG, ORDER_INTENT_SELL_LONG, etc.
+            price: Price for YES side (0.0-1.0)
+            quantity: Number of shares
+            order_type: ORDER_TYPE_LIMIT or ORDER_TYPE_MARKET
+            tif: Time in force
+            slippage_tolerance: For market orders (optional)
+        
+        Returns:
+            Order response dict or None if failed
+        """
+        path = "/v1/orders"
+        headers = self.auth.get_auth_headers("POST", path)
+        
+        payload = {
+            "marketSlug": market_slug,
+            "type": order_type,
+            "intent": intent,
+            "price": {
+                "value": str(price),
+                "currency": "USD"
+            },
+            "quantity": quantity,
+            "tif": tif,
+            "manualOrderIndicator": MANUAL_ORDER_INDICATOR_AUTOMATIC
+        }
+        
+        if order_type == ORDER_TYPE_MARKET and slippage_tolerance:
+            payload["slippageTolerance"] = slippage_tolerance
+        
+        try:
+            response = self.client.post(
+                f"{BASE_URL}{path}",
+                headers=headers,
+                json=payload
+            )
+            response.raise_for_status()
+            result = response.json()
+            logger.info(f"✅ Order placed: {intent} {quantity} @ ${price:.2f} on {market_slug}")
+            return result
+        except httpx.HTTPStatusError as e:
+            logger.error(f"❌ Order failed ({e.response.status_code}): {e.response.text}")
+            return None
+        except Exception as e:
+            logger.error(f"❌ Order error: {e}")
+            return None
+    
+    def close_position(self, market_slug: str) -> Optional[Dict]:
+        """
+        Close entire position at market price.
+        
+        Args:
+            market_slug: Market slug
+        
+        Returns:
+            Close position response or None if failed
+        """
+        path = "/v1/order/close-position"
+        headers = self.auth.get_auth_headers("POST", path)
+        
+        payload = {"marketSlug": market_slug}
+        
+        try:
+            response = self.client.post(
+                f"{BASE_URL}{path}",
+                headers=headers,
+                json=payload
+            )
+            response.raise_for_status()
+            result = response.json()
+            logger.info(f"✅ Position closed: {market_slug}")
+            return result
+        except httpx.HTTPStatusError as e:
+            logger.error(f"❌ Close position failed ({e.response.status_code}): {e.response.text}")
+            return None
+        except Exception as e:
+            logger.error(f"❌ Close position error: {e}")
+            return None
+    
+    def get_open_orders(self, market_slug: Optional[str] = None) -> List[Dict]:
+        """
+        Get open orders.
+        
+        Args:
+            market_slug: Optional filter by market
+        
+        Returns:
+            List of open orders
+        """
+        path = "/v1/orders/open"
+        if market_slug:
+            path += f"?marketSlug={market_slug}"
+        
+        headers = self.auth.get_auth_headers("GET", path)
+        
+        try:
+            response = self.client.get(
+                f"{BASE_URL}{path}",
+                headers=headers
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"❌ Get open orders error: {e}")
+            return []
+    
+    def cancel_order(self, order_id: str) -> bool:
+        """Cancel specific order"""
+        path = f"/v1/order/{order_id}/cancel"
+        headers = self.auth.get_auth_headers("POST", path)
+        
+        try:
+            response = self.client.post(
+                f"{BASE_URL}{path}",
+                headers=headers
+            )
+            response.raise_for_status()
+            logger.info(f"✅ Order canceled: {order_id}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Cancel order error: {e}")
+            return False
+    
+    def cancel_all_orders(self, market_slug: Optional[str] = None) -> bool:
+        """Cancel all open orders"""
+        path = "/v1/orders/open/cancel"
+        headers = self.auth.get_auth_headers("POST", path)
+        
+        payload = {}
+        if market_slug:
+            payload["marketSlug"] = market_slug
+        
+        try:
+            response = self.client.post(
+                f"{BASE_URL}{path}",
+                headers=headers,
+                json=payload if payload else None
+            )
+            response.raise_for_status()
+            logger.info(f"✅ All orders canceled")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Cancel all orders error: {e}")
+            return False
+    
+    def preview_order(
+        self,
+        market_slug: str,
+        intent: str,
+        price: float,
+        quantity: int
+    ) -> Optional[Dict]:
+        """Preview order before placing"""
+        path = "/v1/order/preview"
+        headers = self.auth.get_auth_headers("POST", path)
+        
+        payload = {
+            "marketSlug": market_slug,
+            "intent": intent,
+            "price": {"value": str(price), "currency": "USD"},
+            "quantity": quantity
+        }
+        
+        try:
+            response = self.client.post(
+                f"{BASE_URL}{path}",
+                headers=headers,
+                json=payload
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"❌ Preview order error: {e}")
+            return None
+    
+    def close(self):
+        """Close HTTP client"""
+        self.client.close()

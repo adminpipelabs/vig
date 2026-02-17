@@ -10,13 +10,24 @@ load_dotenv()
 
 @dataclass
 class Config:
+    # API Configuration
     gamma_url: str = "https://gamma-api.polymarket.com"
+    
+    # Legacy CLOB API (for backward compatibility)
     clob_url: str = "https://clob.polymarket.com"
     chain_id: int = 137
-
     private_key: str = field(default_factory=lambda: os.getenv("POLYGON_PRIVATE_KEY", ""))
     funder_address: str = field(default_factory=lambda: os.getenv("POLYGON_FUNDER_ADDRESS", ""))
     signature_type: int = int(os.getenv("SIGNATURE_TYPE", "0"))
+    
+    # Polymarket US API (new)
+    use_us_api: bool = bool(os.getenv("USE_US_API", "true").lower() in ("true", "1", "yes"))
+    polymarket_us_key_id: str = field(default_factory=lambda: os.getenv("POLYMARKET_US_KEY_ID", ""))
+    polymarket_us_private_key: str = field(default_factory=lambda: os.getenv("POLYMARKET_US_PRIVATE_KEY", ""))
+    
+    # Position management
+    profit_target_pct: float = float(os.getenv("PROFIT_TARGET_PCT", "0.15"))  # 15% profit target
+    force_exit_minutes_before_expiry: int = int(os.getenv("FORCE_EXIT_MINUTES", "10"))  # Exit 10 min before expiry
 
     # Vig v2: Agent-based approach - relaxed filters for high volume
     min_favorite_price: float = float(os.getenv("MIN_FAVORITE_PRICE", "0.50"))  # Was 0.70
@@ -55,8 +66,14 @@ class Config:
     def validate(self) -> list[str]:
         issues = []
         if not self.paper_mode:
-            if not self.private_key:
-                issues.append("POLYGON_PRIVATE_KEY required for live trading")
+            if self.use_us_api:
+                if not self.polymarket_us_key_id:
+                    issues.append("POLYMARKET_US_KEY_ID required for US API")
+                if not self.polymarket_us_private_key:
+                    issues.append("POLYMARKET_US_PRIVATE_KEY required for US API")
+            else:
+                if not self.private_key:
+                    issues.append("POLYGON_PRIVATE_KEY required for legacy CLOB API")
         if self.min_favorite_price >= self.max_favorite_price:
             issues.append("min_favorite_price must be < max_favorite_price")
         if self.max_clip < self.starting_clip:
