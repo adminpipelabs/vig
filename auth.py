@@ -154,9 +154,19 @@ def get_auth_from_env() -> Optional[PolymarketUSAuth]:
         logger.warning("⚠️  POLYMARKET_US_KEY_ID or POLYMARKET_US_PRIVATE_KEY not set")
         return None
     
-    # Log key ID (first 8 chars) for debugging
-    logger.info(f"🔑 Loading Polymarket US API auth: key_id={key_id[:8]}...{key_id[-4:] if len(key_id) > 12 else ''} (length: {len(key_id)})")
-    logger.info(f"🔑 Private key length: {len(private_key)} chars")
+    # Strip whitespace from key ID (common issue)
+    key_id = key_id.strip()
+    
+    # Validate key ID format (should be UUID)
+    if len(key_id) != 36 or key_id.count('-') != 4:
+        logger.error(f"❌ Invalid POLYMARKET_US_KEY_ID format: '{key_id}' (expected UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)")
+        return None
+    
+    # Log key ID for debugging (full ID since it's not sensitive)
+    logger.info(f"🔑 Loading Polymarket US API auth")
+    logger.info(f"   Key ID: {key_id}")
+    logger.info(f"   Key ID length: {len(key_id)} chars")
+    logger.info(f"   Private key length: {len(private_key)} chars")
     
     try:
         auth = PolymarketUSAuth(key_id, private_key)
@@ -164,4 +174,6 @@ def get_auth_from_env() -> Optional[PolymarketUSAuth]:
         return auth
     except Exception as e:
         logger.error(f"❌ Failed to initialize auth: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return None
