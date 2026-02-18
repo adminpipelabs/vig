@@ -1287,7 +1287,17 @@ def run():
             p["status"] = "held"
     trade_history = load_trades()
     bot_state["closed_positions"] = load_closed()
-    bot_state["total_returned"] = sum(c.get("revenue", 0) for c in bot_state["closed_positions"])
+    closed = bot_state["closed_positions"]
+    bot_state["total_returned"] = sum(c.get("revenue", 0) for c in closed)
+    bot_state["total_spent"] = (
+        sum(c.get("cost", 0) for c in closed) +
+        sum(p.get("cost", 0) for p in positions)
+    )
+    bot_state["total_buys"] = len(closed) + len(positions)
+    bot_state["total_sells"] = len([c for c in closed if c.get("exit_type") in ("sold", "manual")])
+    log.info("Restored stats: spent=$%.2f returned=$%.2f buys=%d sells=%d",
+             bot_state["total_spent"], bot_state["total_returned"],
+             bot_state["total_buys"], bot_state["total_sells"])
 
     bot_state["running"] = True
     bot_state["started_at"] = datetime.now(timezone.utc).isoformat()
