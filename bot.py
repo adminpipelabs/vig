@@ -281,6 +281,22 @@ def get_matic_balance() -> float:
 
 # ── Market Scanner ────────────────────────────────────────────────────────────
 
+PRIORITY_KEYWORDS = {
+    "bitcoin", "btc", "ethereum", "eth", "solana", "sol", "crypto", "bnb", "xrp",
+    "dogecoin", "doge", "cardano", "polygon", "matic", "ripple", "litecoin",
+    "fed", "interest rate", "inflation", "gdp", "cpi", "treasury", "fomc",
+    "earnings", "revenue", "profit", "quarterly", "eps", "beat",
+    "stock", "s&p", "nasdaq", "dow", "spy", "qqq", "ipo", "market cap",
+    "oil", "gold", "silver", "commodity",
+    "recession", "unemployment", "economy", "economic",
+}
+
+
+def _is_priority_market(question: str) -> bool:
+    q = question.lower()
+    return any(kw in q for kw in PRIORITY_KEYWORDS)
+
+
 def _parse_market_candidates(markets: list, active_token_ids: set) -> list:
     """Extract ALL outcomes — let the order book scoring decide what's tradeable."""
     found = []
@@ -1317,8 +1333,14 @@ def run():
                 active_ids = {p["token_id"] for p in positions}
                 candidates = scan_markets(active_ids)
 
-                pool_size = min(len(candidates), 3000)
-                check_pool = random.sample(candidates[:pool_size], min(80, pool_size))
+                priority = [c for c in candidates if _is_priority_market(c["question"])]
+                others = [c for c in candidates if not _is_priority_market(c["question"])]
+
+                check_pool = priority[:60]
+                remaining_slots = 80 - len(check_pool)
+                if remaining_slots > 0 and others:
+                    check_pool += random.sample(others, min(remaining_slots, len(others)))
+                random.shuffle(check_pool)
 
                 scored = []
                 for mkt in check_pool:
