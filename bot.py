@@ -949,15 +949,24 @@ def api_close():
                 cancel_order(clob_client, pos["sell_order_id"])
                 actions.append("cancelled sell order")
 
-            current = get_current_price(token_id) or pos.get("buy_price", 0)
             size = pos["size"]
             tick = float(pos.get("tick_size", 0.01))
             neg_risk = pos.get("neg_risk", False)
+            buy_price = pos.get("buy_price", 0)
 
             book = clob_client.get_order_book(token_id)
             bids = getattr(book, "bids", [])
-            sell_price = float(bids[0].price) if bids else round(current * 0.95, 4)
-            sell_price = max(sell_price, 0.001)
+            ltp = float(getattr(book, "last_trade_price", 0) or 0)
+
+            good_bids = [b for b in bids if float(b.price) >= buy_price]
+            if good_bids:
+                sell_price = float(good_bids[0].price)
+            elif ltp >= buy_price:
+                sell_price = round(ltp * 0.95, 4)
+            else:
+                return jsonify({"success": False,
+                    "error": f"No buyers above your buy price (${buy_price:.3f}). "
+                             f"Best bid: ${float(bids[0].price):.3f}" if bids else "No bids at all"})
 
             sell_args = OrderArgs(
                 token_id=token_id,
@@ -967,16 +976,14 @@ def api_close():
             )
             opts = CreateOrderOptions(tick_size=str(tick), neg_risk=neg_risk)
             signed = clob_client.create_order(sell_args, options=opts)
-            result = clob_client.post_order(signed, OrderType.FOK)
+            result = clob_client.post_order(signed, OrderType.GTC)
 
             if result.get("orderID"):
-                actions.append(f"sold {size:.0f} shares @ ${sell_price:.3f}")
+                actions.append(f"sell order placed @ ${sell_price:.3f} (GTC)")
                 close_position(pos, "manual", sell_price)
             else:
-                signed2 = clob_client.create_order(sell_args, options=opts)
-                result2 = clob_client.post_order(signed2, OrderType.GTC)
-                actions.append(f"sell order placed @ ${sell_price:.3f}")
-                close_position(pos, "manual", sell_price)
+                return jsonify({"success": False,
+                    "error": f"Sell order failed: {result.get('errorMsg', 'unknown')}"})
 
         else:
             close_position(pos, "manual", 0)
