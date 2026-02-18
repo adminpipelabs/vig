@@ -852,20 +852,19 @@ async function refresh(){
     const pe=document.getElementById('panelOpen');
     if(!d.positions.length){pe.innerHTML='<div class="empty">No open bets</div>'}
     else{
-      let h='<table><tr><th>Market</th><th>Shares</th><th>Buy</th><th>Last</th><th>Bid</th><th>P&L</th><th>Target</th><th>Status</th><th></th></tr>';
+      let h='<table><tr><th>Market</th><th>Shares</th><th>Entry</th><th>Bid</th><th>Ask</th><th>P&L (at Bid)</th><th>Target</th><th>Status</th><th></th></tr>';
       d.positions.forEach((p,i)=>{
         const st=p.status||'pending';
-        const cp=p.current_price||0;const bp=p.buy_price||0;const sz=p.size||0;
-        const bid=p.best_bid||0;
-        const last=cp?'$'+cp.toFixed(3):'--';
+        const bp=p.buy_price||0;const sz=p.size||0;
+        const bid=p.best_bid||0;const ask=p.best_ask||0;
         const bidStr=bid?'$'+bid.toFixed(3):'--';
-        const nc=cp>bp?'pnl-pos':cp<bp?'pnl-neg':'';
+        const askStr=ask?'$'+ask.toFixed(3):'--';
         const bc=bid>bp?'pnl-pos':bid<bp?'pnl-neg':'';
-        const sellVal=bid>bp?bid:cp;
-        const upnl=sellVal?(sellVal*sz)-(p.cost||0):0;
-        const upnlStr=sellVal?'$'+pnlStr(upnl):'--';
-        const upnlCls=sellVal?pnlClass(upnl):'';
-        h+=`<tr><td class="trunc">${p.question}</td><td>${sz.toFixed(0)}</td><td>$${bp.toFixed(3)}</td><td class="${nc}">${last}</td><td class="${bc}">${bidStr}</td><td class="${upnlCls}">${upnlStr}</td><td>$${(p.sell_target||0).toFixed(2)}</td><td><span class="st ${st}">${st}</span></td><td><button class="cbtn" onclick="closePos('${p.token_id}')">\u2715</button></td></tr>`;
+        const ac=ask>bp?'pnl-pos':ask<bp?'pnl-neg':'';
+        const upnl=bid?(bid*sz)-(p.cost||0):0;
+        const upnlStr=bid?'$'+pnlStr(upnl):'--';
+        const upnlCls=bid?pnlClass(upnl):'';
+        h+=`<tr><td class="trunc">${p.question}</td><td>${sz.toFixed(0)}</td><td>$${bp.toFixed(3)}</td><td class="${bc}">${bidStr}</td><td class="${ac}">${askStr}</td><td class="${upnlCls}">${upnlStr}</td><td>$${(p.sell_target||0).toFixed(2)}</td><td><span class="st ${st}">${st}</span></td><td><button class="cbtn" onclick="closePos('${p.token_id}')">\u2715</button></td></tr>`;
       });
       pe.innerHTML=h+'</table>';
     }
