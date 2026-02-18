@@ -400,25 +400,25 @@ def score_market(token_id: str, client: ClobClient, label: str = "") -> dict | N
         if not bids or not asks:
             blacklisted_tokens.add(token_id)
             save_blacklist(blacklisted_tokens)
-            log.debug("REJECT %s: no bids/asks", tag)
+            log.info("REJECT %s: no bids/asks", tag)
             return None
 
         if best_bid < 0.02:
             blacklisted_tokens.add(token_id)
             save_blacklist(blacklisted_tokens)
-            log.debug("REJECT %s: bid $%.3f < $0.02", tag, best_bid)
+            log.info("REJECT %s: bid $%.3f < $0.02", tag, best_bid)
             return None
 
         spread = (best_ask - best_bid) / best_ask if best_ask > 0 else 1
         if spread > 0.50:
-            log.debug("REJECT %s: spread %.0f%% (bid=$%.3f ask=$%.3f)",
-                      tag, spread * 100, best_bid, best_ask)
+            log.info("REJECT %s: spread %.0f%% (bid=$%.3f ask=$%.3f)",
+                     tag, spread * 100, best_bid, best_ask)
             return None
 
         bid_depth = sum(float(b.size) * float(b.price) for b in bids[:5])
         if bid_depth < BET_SIZE * 2:
-            log.debug("REJECT %s: depth $%.1f < $%.0f",
-                      tag, bid_depth, BET_SIZE * 2)
+            log.info("REJECT %s: depth $%.1f < $%.0f",
+                     tag, bid_depth, BET_SIZE * 2)
             return None
 
         ask_depth = sum(float(a.size) * float(a.price) for a in asks[:5])
