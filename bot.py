@@ -1288,12 +1288,13 @@ def run():
     trade_history = load_trades()
     bot_state["closed_positions"] = load_closed()
     closed = bot_state["closed_positions"]
-    bot_state["total_returned"] = sum(c.get("revenue", 0) for c in closed)
+    filled_closed = [c for c in closed if c.get("exit_type") not in ("expired",)]
+    bot_state["total_returned"] = sum(c.get("revenue", 0) for c in filled_closed)
     bot_state["total_spent"] = (
-        sum(c.get("cost", 0) for c in closed) +
+        sum(c.get("cost", 0) for c in filled_closed) +
         sum(p.get("cost", 0) for p in positions)
     )
-    bot_state["total_buys"] = len(closed) + len(positions)
+    bot_state["total_buys"] = len(filled_closed) + len(positions)
     bot_state["total_sells"] = len([c for c in closed if c.get("exit_type") in ("sold", "manual")])
     log.info("Restored stats: spent=$%.2f returned=$%.2f buys=%d sells=%d",
              bot_state["total_spent"], bot_state["total_returned"],
