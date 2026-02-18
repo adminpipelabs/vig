@@ -362,7 +362,7 @@ def scan_markets(active_token_ids: set) -> list:
 # ── Order Placement ───────────────────────────────────────────────────────────
 
 def place_buy(client: ClobClient, market: dict) -> dict | None:
-    """Place a BUY limit order at the market's current price."""
+    """Place a BUY order — tries FOK (instant fill), falls back to GTC (limit)."""
     token_id = market["token_id"]
     price = market["price"]
     tick = float(market.get("tick_size", 0.01))
@@ -385,15 +385,26 @@ def place_buy(client: ClobClient, market: dict) -> dict | None:
             side=BUY,
         )
         opts = CreateOrderOptions(tick_size=str(tick), neg_risk=neg_risk)
-        signed = client.create_order(buy_args, options=opts)
-        result = client.post_order(signed, OrderType.GTC)
 
-        if not result.get("success", True) and result.get("errorMsg"):
-            log.warning("Buy rejected: %s", result["errorMsg"])
+        signed = client.create_order(buy_args, options=opts)
+        result = client.post_order(signed, OrderType.FOK)
+
+        order_id = result.get("orderID", "")
+        filled = result.get("status") == "MATCHED" or result.get("status") == "FILLED"
+
+        if not order_id:
+            signed2 = client.create_order(buy_args, options=opts)
+            result = client.post_order(signed2, OrderType.GTC)
+            order_id = result.get("orderID", "?")
+            filled = False
+
+        if not order_id or order_id == "?":
+            if result.get("errorMsg"):
+                log.warning("Buy rejected: %s", result["errorMsg"])
             return None
 
-        order_id = result.get("orderID", "?")
-        log.info("Buy order live. ID: %s", order_id)
+        status = "held" if filled else "pending"
+        log.info("Buy %s. ID: %s", "filled" if filled else "pending", order_id)
 
         position = {
             "buy_order_id": order_id,
@@ -408,7 +419,7 @@ def place_buy(client: ClobClient, market: dict) -> dict | None:
             "cost": cost,
             "tick_size": tick,
             "neg_risk": neg_risk,
-            "status": "buying",
+            "status": status,
             "placed_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -422,6 +433,9 @@ def place_buy(client: ClobClient, market: dict) -> dict | None:
             "cost": cost,
             "time": datetime.now(timezone.utc).isoformat(),
         })
+
+        if filled:
+            place_sell(client, position)
 
         return position
 
@@ -460,7 +474,7 @@ def place_sell(client: ClobClient, position: dict) -> bool:
 
         sell_id = result.get("orderID", "?")
         position["sell_order_id"] = sell_id
-        position["status"] = "selling"
+        position["status"] = "held"
         log.info("Sell order live. ID: %s", sell_id)
 
         bot_state["total_sells"] += 1
@@ -608,8 +622,8 @@ table{width:100%;border-collapse:collapse}
 th{text-align:left;font-size:0.65rem;color:#555;text-transform:uppercase;padding:6px 8px;border-bottom:1px solid #1e1e30}
 td{padding:8px;font-size:0.8rem;border-bottom:1px solid #0e0e18}
 .st{font-size:0.7rem;padding:2px 6px;border-radius:3px;font-weight:600}
-.st.buying{background:#1e3a5f;color:#60a5fa}
-.st.selling{background:#3f2a1a;color:#f59e0b}
+.st.pending{background:#1e3a5f;color:#60a5fa}
+.st.held{background:#1a3f2a;color:#22c55e}
 .st.sold{background:#1a3f2a;color:#22c55e}
 .st.claimed{background:#1a3f2a;color:#22c55e}
 .st.expired{background:#3f1a1a;color:#ef4444}
@@ -734,13 +748,17 @@ async function refresh(){
     const pe=document.getElementById('panelOpen');
     if(!d.positions.length){pe.innerHTML='<div class="empty">No open bets</div>'}
     else{
-      let h='<table><tr><th>Market</th><th>Shares</th><th>Buy</th><th>Now</th><th>Cost</th><th>Target</th><th>Status</th><th></th></tr>';
+      let h='<table><tr><th>Market</th><th>Shares</th><th>Buy</th><th>Now</th><th>P&L</th><th>Target</th><th>Status</th><th></th></tr>';
       d.positions.forEach((p,i)=>{
-        const st=p.status||'buying';
-        const now=p.current_price?'$'+p.current_price.toFixed(3):'--';
-        const cp=p.current_price||0;const bp=p.buy_price||0;
+        const st=p.status||'pending';
+        const cp=p.current_price||0;const bp=p.buy_price||0;const sz=p.size||0;
+        const now=cp?'$'+cp.toFixed(3):'--';
         const nc=cp>bp?'pnl-pos':cp<bp?'pnl-neg':'';
-        h+=`<tr><td class="trunc">${p.question}</td><td>${(p.size||0).toFixed(0)}</td><td>$${bp.toFixed(3)}</td><td class="${nc}">${now}</td><td>$${(p.cost||0).toFixed(2)}</td><td>$${(p.sell_target||0).toFixed(2)}</td><td><span class="st ${st}">${st}</span></td><td><button class="cbtn" onclick="closePos('${p.token_id}')">X</button></td></tr>`;
+        const upnl=cp?(cp*sz)-(p.cost||0):0;
+        const upnlStr=cp?'$'+pnlStr(upnl):'--';
+        const upnlCls=cp?pnlClass(upnl):'';
+        const stLabel=st==='pending'?'pending':st==='held'?'held':'done';
+        h+=`<tr><td class="trunc">${p.question}</td><td>${sz.toFixed(0)}</td><td>$${bp.toFixed(3)}</td><td class="${nc}">${now}</td><td class="${upnlCls}">${upnlStr}</td><td>$${(p.sell_target||0).toFixed(2)}</td><td><span class="st ${st}">${stLabel}</span></td><td><button class="cbtn" onclick="closePos('${p.token_id}')">\u2715</button></td></tr>`;
       });
       pe.innerHTML=h+'</table>';
     }
@@ -920,13 +938,13 @@ def api_close():
     try:
         actions = []
 
-        if pos["status"] == "buying":
+        if pos["status"] == "pending":
             cancel_order(clob_client, pos["buy_order_id"])
             actions.append("cancelled buy order")
             current = get_current_price(token_id) or 0
             close_position(pos, "manual", 0)
 
-        elif pos["status"] in ("selling", "bought"):
+        elif pos["status"] == "held":
             if pos.get("sell_order_id"):
                 cancel_order(clob_client, pos["sell_order_id"])
                 actions.append("cancelled sell order")
@@ -1010,6 +1028,11 @@ def run():
 
     global trade_history
     positions = load_positions()
+    for p in positions:
+        if p.get("status") == "buying":
+            p["status"] = "pending"
+        elif p.get("status") in ("selling", "bought"):
+            p["status"] = "held"
     trade_history = load_trades()
     bot_state["closed_positions"] = load_closed()
     bot_state["total_returned"] = sum(c.get("revenue", 0) for c in bot_state["closed_positions"])
@@ -1027,17 +1050,17 @@ def run():
             log.info("── Tick ──────────────────────────────────────────")
             log.info("Positions: %d / %d", len(positions), MAX_BETS)
 
-            # 1. Check buy orders — if filled, place sell
+            # 1. Check pending buys — if filled, place sell
             for pos in positions:
-                if pos["status"] == "buying":
+                if pos["status"] == "pending":
                     if check_order_filled(clob, pos["buy_order_id"]):
                         log.info("Buy filled: %s", pos["question"][:50])
-                        pos["status"] = "bought"
+                        pos["status"] = "held"
                         place_sell(clob, pos)
                         save_positions(positions)
 
-                elif pos["status"] == "selling":
-                    if check_order_filled(clob, pos["sell_order_id"]):
+                elif pos["status"] == "held":
+                    if pos.get("sell_order_id") and check_order_filled(clob, pos["sell_order_id"]):
                         log.info("Sell filled: %s", pos["question"][:50])
                         pos["status"] = "done"
                         close_position(pos, "sold", SELL_AT)
@@ -1051,7 +1074,7 @@ def run():
 
             # 2. Check resolved markets — claim on-chain
             for pos in positions:
-                if pos["status"] in ("buying", "bought", "selling"):
+                if pos["status"] in ("pending", "held"):
                     if check_market_resolved(pos):
                         claimed = try_claim(w3, account, ctf, pos)
                         pos["status"] = "done"
