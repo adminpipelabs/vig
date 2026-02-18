@@ -115,6 +115,7 @@ ERC20_ABI = [
 
 POSITIONS_FILE = "positions.json"
 TRADES_FILE = "trades.json"
+CLOSED_FILE = "closed.json"
 
 # ── Shared State ──────────────────────────────────────────────────────────────
 
@@ -129,9 +130,11 @@ bot_state = {
     "last_tick": None,
     "wallet": None,
     "positions": [],
+    "closed_positions": [],
     "total_buys": 0,
     "total_sells": 0,
     "total_spent": 0.0,
+    "total_returned": 0.0,
 }
 
 trade_history = []
@@ -166,6 +169,43 @@ def save_trades(trades: list):
 def add_trade(trade: dict):
     trade_history.append(trade)
     save_trades(trade_history)
+
+
+def load_closed() -> list:
+    if os.path.exists(CLOSED_FILE):
+        with open(CLOSED_FILE) as f:
+            return json.load(f)
+    return []
+
+
+def save_closed(closed: list):
+    with open(CLOSED_FILE, "w") as f:
+        json.dump(closed[-200:], f, indent=2)
+
+
+def close_position(pos: dict, exit_type: str, exit_price: float):
+    """Move a position to closed list with P&L calculated."""
+    cost = pos.get("cost", 0)
+    size = pos.get("size", 0)
+    revenue = round(size * exit_price, 2) if exit_type == "sold" else round(size * exit_price, 2)
+    pnl = round(revenue - cost, 2)
+
+    closed = {
+        "question": pos["question"],
+        "buy_price": pos.get("buy_price", 0),
+        "exit_price": exit_price,
+        "size": size,
+        "cost": cost,
+        "revenue": revenue,
+        "pnl": pnl,
+        "exit_type": exit_type,
+        "opened_at": pos.get("placed_at", ""),
+        "closed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    bot_state["closed_positions"].append(closed)
+    bot_state["total_returned"] += revenue
+    save_closed(bot_state["closed_positions"])
 
 
 # ── Clients ───────────────────────────────────────────────────────────────────
@@ -499,30 +539,35 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:#0a0a0f;color:#e0e0e0;min-height:100vh;padding:20px}
-.c{max-width:860px;margin:0 auto}
+.c{max-width:960px;margin:0 auto}
 h1{font-size:1.5rem;color:#fff;margin-bottom:4px;display:flex;align-items:center;gap:8px}
 .sub{color:#666;font-size:0.82rem;margin-bottom:24px}
 .wallet{font-family:monospace;font-size:0.75rem;color:#555;margin-bottom:20px;word-break:break-all}
 .strat{background:#0f1a2e;border:1px solid #1e2e50;border-radius:8px;padding:10px 14px;margin-bottom:20px;font-size:0.8rem;color:#7aa2d6}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:24px}
-.card{background:#141420;border:1px solid #1e1e30;border-radius:12px;padding:16px}
-.card .l{font-size:0.7rem;color:#888;text-transform:uppercase;letter-spacing:.5px}
-.card .v{font-size:1.5rem;font-weight:700;margin-top:4px;color:#fff}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;margin-bottom:24px}
+.card{background:#141420;border:1px solid #1e1e30;border-radius:12px;padding:14px}
+.card .l{font-size:0.65rem;color:#888;text-transform:uppercase;letter-spacing:.5px}
+.card .v{font-size:1.35rem;font-weight:700;margin-top:4px;color:#fff}
 .card .v.g{color:#22c55e}.card .v.r{color:#ef4444}.card .v.b{color:#3b82f6}.card .v.y{color:#f59e0b}
 .sec{background:#141420;border:1px solid #1e1e30;border-radius:12px;padding:16px;margin-bottom:16px}
 .sec h2{font-size:0.85rem;color:#aaa;margin-bottom:12px;text-transform:uppercase;letter-spacing:.5px}
 table{width:100%;border-collapse:collapse}
-th{text-align:left;font-size:0.68rem;color:#555;text-transform:uppercase;padding:6px 8px;border-bottom:1px solid #1e1e30}
-td{padding:8px;font-size:0.82rem;border-bottom:1px solid #0e0e18}
+th{text-align:left;font-size:0.65rem;color:#555;text-transform:uppercase;padding:6px 8px;border-bottom:1px solid #1e1e30}
+td{padding:8px;font-size:0.8rem;border-bottom:1px solid #0e0e18}
+.st{font-size:0.7rem;padding:2px 6px;border-radius:3px;font-weight:600}
+.st.buying{background:#1e3a5f;color:#60a5fa}
+.st.selling{background:#3f2a1a;color:#f59e0b}
+.st.sold{background:#1a3f2a;color:#22c55e}
+.st.claimed{background:#1a3f2a;color:#22c55e}
+.st.expired{background:#3f1a1a;color:#ef4444}
+.pnl-pos{color:#22c55e;font-weight:600}
+.pnl-neg{color:#ef4444;font-weight:600}
+.pnl-zero{color:#888;font-weight:600}
 .badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:0.68rem;font-weight:600}
 .badge.buy{background:#1e3a5f;color:#60a5fa}
 .badge.sell{background:#3f2a1a;color:#f59e0b}
 .badge.claim{background:#1a3f2a;color:#22c55e}
 .badge.withdraw{background:#2a1a3f;color:#c084fc}
-.st{font-size:0.72rem;padding:2px 6px;border-radius:3px}
-.st.buying{background:#1e3a5f;color:#60a5fa}
-.st.selling{background:#3f2a1a;color:#f59e0b}
-.st.done{background:#1a3f2a;color:#22c55e}
 .wf{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 input,button{font-family:inherit;font-size:0.85rem;padding:8px 12px;border-radius:8px;border:1px solid #1e1e30;background:#0a0a0f;color:#e0e0e0}
 input{flex:1;min-width:120px}input:focus{outline:none;border-color:#3b82f6}
@@ -533,8 +578,12 @@ button:hover{background:#2563eb}button:disabled{opacity:.5;cursor:not-allowed}
 .msg{margin-top:8px;font-size:0.8rem;padding:8px;border-radius:6px}
 .msg.ok{background:#1a3f2a;color:#22c55e}.msg.err{background:#3f1a1a;color:#ef4444}
 .empty{color:#444;font-style:italic;padding:12px 0;font-size:0.85rem}
-.trunc{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-@media(max-width:600px){.cards{grid-template-columns:1fr 1fr}.trunc{max-width:130px}}
+.trunc{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tabs{display:flex;gap:4px;margin-bottom:12px}
+.tab{padding:6px 14px;border-radius:6px;font-size:0.78rem;cursor:pointer;background:#0a0a0f;border:1px solid #1e1e30;color:#888}
+.tab.active{background:#1e3a5f;color:#60a5fa;border-color:#2e4a6f}
+.tab .cnt{font-size:0.68rem;margin-left:4px;opacity:.7}
+@media(max-width:600px){.cards{grid-template-columns:1fr 1fr}.trunc{max-width:110px}}
 </style>
 </head>
 <body>
@@ -546,21 +595,24 @@ button:hover{background:#2563eb}button:disabled{opacity:.5;cursor:not-allowed}
 
   <div class="cards">
     <div class="card"><div class="l">USDC Balance</div><div class="v g" id="bal">--</div></div>
-    <div class="card"><div class="l">Active</div><div class="v b" id="active">--</div></div>
-    <div class="card"><div class="l">Buys</div><div class="v" id="tbuys">--</div></div>
-    <div class="card"><div class="l">Sells</div><div class="v y" id="tsells">--</div></div>
-    <div class="card"><div class="l">Spent</div><div class="v" id="tspent">--</div></div>
+    <div class="card"><div class="l">Open Bets</div><div class="v b" id="active">--</div></div>
+    <div class="card"><div class="l">Invested</div><div class="v" id="tspent">--</div></div>
+    <div class="card"><div class="l">Returned</div><div class="v g" id="treturned">--</div></div>
+    <div class="card"><div class="l">Net P&L</div><div class="v" id="pnl">--</div></div>
+    <div class="card"><div class="l">Win Rate</div><div class="v y" id="winrate">--</div></div>
+    <div class="card"><div class="l">Closed</div><div class="v" id="tclosed">--</div></div>
     <div class="card"><div class="l">Gas (POL)</div><div class="v" id="gas">--</div></div>
   </div>
 
   <div class="sec">
-    <h2>Active Positions</h2>
-    <div id="pos"><div class="empty">No active positions</div></div>
-  </div>
-
-  <div class="sec">
-    <h2>Recent Trades</h2>
-    <div id="trades"><div class="empty">No trades yet</div></div>
+    <div class="tabs">
+      <div class="tab active" onclick="showTab('open')" id="tabOpen">Open Bets<span class="cnt" id="openCnt"></span></div>
+      <div class="tab" onclick="showTab('closed')" id="tabClosed">Closed Bets<span class="cnt" id="closedCnt"></span></div>
+      <div class="tab" onclick="showTab('log')" id="tabLog">Trade Log</div>
+    </div>
+    <div id="panelOpen"></div>
+    <div id="panelClosed" style="display:none"></div>
+    <div id="panelLog" style="display:none"></div>
   </div>
 
   <div class="sec">
@@ -575,6 +627,19 @@ button:hover{background:#2563eb}button:disabled{opacity:.5;cursor:not-allowed}
 </div>
 
 <script>
+let currentTab='open';
+function showTab(t){
+  currentTab=t;
+  ['open','closed','log'].forEach(x=>{
+    document.getElementById('panel'+x.charAt(0).toUpperCase()+x.slice(1)).style.display=x===t?'':'none';
+    document.getElementById('tab'+x.charAt(0).toUpperCase()+x.slice(1)).className='tab'+(x===t?' active':'');
+  });
+}
+
+function pnlClass(v){return v>0?'pnl-pos':v<0?'pnl-neg':'pnl-zero'}
+function pnlStr(v){return (v>=0?'+':'')+v.toFixed(2)}
+function timeFmt(s){if(!s)return'--';const d=new Date(s);return d.toLocaleDateString('en-US',{month:'short',day:'numeric'})+' '+d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})}
+
 async function refresh(){
   try{
     const r=await fetch('/api/status');
@@ -583,31 +648,58 @@ async function refresh(){
     document.getElementById('dot').className='dot '+(d.running?'on':'off');
     const tick=d.last_tick?new Date(d.last_tick).toLocaleTimeString():'--';
     document.getElementById('sub').textContent=d.running
-      ?'Running · Last tick '+tick+' · Poll '+d.config.poll_seconds+'s':'Offline';
+      ?'Running \u00b7 Last tick '+tick+' \u00b7 Poll '+d.config.poll_seconds+'s':'Offline';
     document.getElementById('wallet').textContent=d.wallet||'';
     document.getElementById('strat').textContent=
-      'Strategy: Buy below $'+d.config.buy_below.toFixed(2)+' → Sell at $'+d.config.sell_at.toFixed(2)+
-      ' · $'+d.config.bet_size+'/bet · Min volume $'+d.config.min_volume.toLocaleString();
+      'Buy below $'+d.config.buy_below.toFixed(2)+' \u2192 Sell at $'+d.config.sell_at.toFixed(2)+
+      ' \u00b7 $'+d.config.bet_size+'/bet \u00b7 Min vol $'+d.config.min_volume.toLocaleString();
 
     document.getElementById('bal').textContent='$'+d.usdc_balance.toFixed(2);
     document.getElementById('active').textContent=d.active_positions+'/'+d.max_bets;
-    document.getElementById('tbuys').textContent=d.total_buys;
-    document.getElementById('tsells').textContent=d.total_sells;
     document.getElementById('tspent').textContent='$'+d.total_spent.toFixed(2);
+    document.getElementById('treturned').textContent='$'+d.total_returned.toFixed(2);
+
+    const netPnl=d.total_returned-d.total_spent;
+    const pnlEl=document.getElementById('pnl');
+    pnlEl.textContent='$'+pnlStr(netPnl);
+    pnlEl.className='v '+(netPnl>=0?'g':'r');
+
+    const closed=d.closed_positions||[];
+    const wins=closed.filter(c=>c.pnl>0).length;
+    const wr=closed.length?((wins/closed.length)*100).toFixed(0)+'%':'--';
+    document.getElementById('winrate').textContent=wr;
+    document.getElementById('tclosed').textContent=closed.length;
     document.getElementById('gas').textContent=d.gas_balance.toFixed(4);
 
-    const pe=document.getElementById('pos');
-    if(!d.positions.length){pe.innerHTML='<div class="empty">No active positions</div>'}
+    document.getElementById('openCnt').textContent='('+d.positions.length+')';
+    document.getElementById('closedCnt').textContent='('+closed.length+')';
+
+    // Open positions
+    const pe=document.getElementById('panelOpen');
+    if(!d.positions.length){pe.innerHTML='<div class="empty">No open bets</div>'}
     else{
-      let h='<table><tr><th>Market</th><th>Buy</th><th>Target</th><th>Status</th></tr>';
+      let h='<table><tr><th>Market</th><th>Shares</th><th>Buy Price</th><th>Cost</th><th>Target</th><th>Status</th></tr>';
       d.positions.forEach(p=>{
         const st=p.status||'buying';
-        h+=`<tr><td class="trunc">${p.question}</td><td>$${(p.buy_price||0).toFixed(2)}</td><td>$${(p.sell_target||0).toFixed(2)}</td><td><span class="st ${st}">${st}</span></td></tr>`;
+        h+=`<tr><td class="trunc">${p.question}</td><td>${(p.size||0).toFixed(0)}</td><td>$${(p.buy_price||0).toFixed(3)}</td><td>$${(p.cost||0).toFixed(2)}</td><td>$${(p.sell_target||0).toFixed(2)}</td><td><span class="st ${st}">${st}</span></td></tr>`;
       });
       pe.innerHTML=h+'</table>';
     }
 
-    const te=document.getElementById('trades');
+    // Closed positions
+    const ce=document.getElementById('panelClosed');
+    if(!closed.length){ce.innerHTML='<div class="empty">No closed bets yet</div>'}
+    else{
+      let h='<table><tr><th>Market</th><th>Buy</th><th>Exit</th><th>Cost</th><th>Return</th><th>P&L</th><th>Type</th><th>Closed</th></tr>';
+      closed.slice().reverse().forEach(c=>{
+        const pc=pnlClass(c.pnl);
+        h+=`<tr><td class="trunc">${c.question}</td><td>$${(c.buy_price||0).toFixed(3)}</td><td>$${(c.exit_price||0).toFixed(2)}</td><td>$${(c.cost||0).toFixed(2)}</td><td>$${(c.revenue||0).toFixed(2)}</td><td class="${pc}">$${pnlStr(c.pnl)}</td><td><span class="st ${c.exit_type}">${c.exit_type}</span></td><td>${timeFmt(c.closed_at)}</td></tr>`;
+      });
+      ce.innerHTML=h+'</table>';
+    }
+
+    // Trade log
+    const te=document.getElementById('panelLog');
     if(!d.trades.length){te.innerHTML='<div class="empty">No trades yet</div>'}
     else{
       let h='<table><tr><th>Type</th><th>Market</th><th>Details</th><th>Time</th></tr>';
@@ -616,8 +708,7 @@ async function refresh(){
         const det=t.type==='BUY'?'$'+(t.cost||0).toFixed(2)+' @ $'+(t.price||0).toFixed(2)
                   :t.type==='SELL'?(t.size||0).toFixed(0)+' shares @ $'+(t.price||0).toFixed(2)
                   :t.type==='CLAIM'?'Redeemed':'Sent';
-        const tm=new Date(t.time).toLocaleTimeString();
-        h+=`<tr><td><span class="badge ${cls}">${t.type}</span></td><td class="trunc">${t.question||''}</td><td>${det}</td><td>${tm}</td></tr>`;
+        h+=`<tr><td><span class="badge ${cls}">${t.type}</span></td><td class="trunc">${t.question||''}</td><td>${det}</td><td>${timeFmt(t.time)}</td></tr>`;
       });
       te.innerHTML=h+'</table>';
     }
@@ -672,6 +763,8 @@ def api_status():
         "total_buys": bot_state["total_buys"],
         "total_sells": bot_state["total_sells"],
         "total_spent": bot_state["total_spent"],
+        "total_returned": bot_state["total_returned"],
+        "closed_positions": bot_state["closed_positions"][-50:],
         "trades": trade_history[-30:],
         "config": {
             "bet_size": BET_SIZE,
@@ -755,6 +848,8 @@ def run():
     global trade_history
     positions = load_positions()
     trade_history = load_trades()
+    bot_state["closed_positions"] = load_closed()
+    bot_state["total_returned"] = sum(c.get("revenue", 0) for c in bot_state["closed_positions"])
 
     bot_state["running"] = True
     bot_state["started_at"] = datetime.now(timezone.utc).isoformat()
@@ -782,6 +877,7 @@ def run():
                     if check_order_filled(clob, pos["sell_order_id"]):
                         log.info("Sell filled: %s", pos["question"][:50])
                         pos["status"] = "done"
+                        close_position(pos, "sold", SELL_AT)
                         add_trade({
                             "type": "SELL",
                             "question": pos["question"][:80],
@@ -794,8 +890,10 @@ def run():
             for pos in positions:
                 if pos["status"] in ("buying", "bought", "selling"):
                     if check_market_resolved(pos):
-                        try_claim(w3, account, ctf, pos)
+                        claimed = try_claim(w3, account, ctf, pos)
                         pos["status"] = "done"
+                        exit_price = 1.0 if claimed else 0.0
+                        close_position(pos, "claimed" if claimed else "expired", exit_price)
 
             # 3. Remove done positions
             positions = [p for p in positions if p["status"] != "done"]
