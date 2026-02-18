@@ -76,6 +76,8 @@ PORT            = int(os.getenv("PORT", "8080"))
 
 CLOB_HOST       = "https://clob.polymarket.com"
 GAMMA_API       = "https://gamma-api.polymarket.com"
+POLY_API        = "https://gateway.polymarket.us"
+SCAN_CATEGORIES = ["crypto", "sports", "economics", "finance"]
 
 CTF_ADDRESS     = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 USDC_ADDRESS    = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
@@ -345,6 +347,9 @@ def _parse_market_candidates(markets: list, active_token_ids: set) -> list:
                     "volume": volume,
                     "tick_size": market.get("orderPriceMinTickSize", 0.01),
                     "neg_risk": bool(market.get("negRisk")),
+                    "best_bid": float(market.get("bestBid") or 0),
+                    "best_ask": float(market.get("bestAsk") or 0),
+                    "spread": float(market.get("spread") or 0),
                 })
 
         except Exception as e:
@@ -373,44 +378,75 @@ blacklisted_tokens: set = load_blacklist()
 
 
 def scan_markets(active_token_ids: set) -> list:
-    """Scan all open markets, paginating through everything."""
+    """Scan markets via Polymarket API with category filtering + Gamma fallback."""
     seen_tokens = set()
     qualifying = []
     total_scanned = 0
-    offset = 0
-    page_size = 100
 
-    while True:
-        try:
-            resp = requests.get(
-                f"{GAMMA_API}/markets",
-                params={"closed": "false", "limit": page_size, "offset": offset},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            markets = resp.json()
+    for cat in SCAN_CATEGORIES:
+        offset = 0
+        page_size = 100
+        while True:
+            try:
+                resp = requests.get(
+                    f"{GAMMA_API}/markets",
+                    params={
+                        "closed": "false",
+                        "active": "true",
+                        "limit": page_size,
+                        "offset": offset,
+                        "order": "volume24hr",
+                        "ascending": "false",
+                        "tag": cat,
+                    },
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                markets = resp.json()
+                if not markets:
+                    break
 
-            if not markets:
+                total_scanned += len(markets)
+
+                for c in _parse_market_candidates(markets, active_token_ids):
+                    tid = c["token_id"]
+                    if tid not in seen_tokens and tid not in blacklisted_tokens:
+                        ba = float(c.get("best_ask") or c.get("price") or 0)
+                        bb = float(c.get("best_bid") or 0)
+                        if ba > 0 and (ba < BUY_MIN or ba > BUY_MAX):
+                            continue
+                        seen_tokens.add(tid)
+                        qualifying.append(c)
+
+                if len(markets) < page_size or offset >= 300:
+                    break
+                offset += page_size
+
+            except Exception as e:
+                log.error("Scan %s page failed (offset %d): %s", cat, offset, e)
                 break
 
-            total_scanned += len(markets)
+    # Also scan general high-volume markets for anything we missed
+    try:
+        resp = requests.get(
+            f"{GAMMA_API}/markets",
+            params={"closed": "false", "active": "true", "limit": 200,
+                    "order": "volume24hr", "ascending": "false"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        for c in _parse_market_candidates(resp.json(), active_token_ids):
+            tid = c["token_id"]
+            if tid not in seen_tokens and tid not in blacklisted_tokens:
+                seen_tokens.add(tid)
+                qualifying.append(c)
+                total_scanned += 1
+    except Exception as e:
+        log.error("General scan failed: %s", e)
 
-            for c in _parse_market_candidates(markets, active_token_ids):
-                tid = c["token_id"]
-                if tid not in seen_tokens and tid not in blacklisted_tokens:
-                    seen_tokens.add(tid)
-                    qualifying.append(c)
-
-            if len(markets) < page_size:
-                break
-            offset += page_size
-
-        except Exception as e:
-            log.error("Scan page failed (offset %d): %s", offset, e)
-            break
-
-    log.info("Scan — %d candidates (from %d total markets, %d blacklisted)",
-             len(qualifying), total_scanned, len(blacklisted_tokens))
+    log.info("Scan — %d candidates (from %d total, %d blacklisted, categories: %s)",
+             len(qualifying), total_scanned, len(blacklisted_tokens),
+             ",".join(SCAN_CATEGORIES))
 
     qualifying.sort(key=lambda m: m["volume"], reverse=True)
     return qualifying
