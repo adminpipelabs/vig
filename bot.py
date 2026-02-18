@@ -113,9 +113,11 @@ ERC20_ABI = [
     },
 ]
 
-POSITIONS_FILE = "positions.json"
-TRADES_FILE = "trades.json"
-CLOSED_FILE = "closed.json"
+DATA_DIR = os.getenv("DATA_DIR", "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+POSITIONS_FILE = os.path.join(DATA_DIR, "positions.json")
+TRADES_FILE = os.path.join(DATA_DIR, "trades.json")
+CLOSED_FILE = os.path.join(DATA_DIR, "closed.json")
 
 # ── Shared State ──────────────────────────────────────────────────────────────
 
