@@ -14,6 +14,7 @@ Run:
 import os
 import json
 import time
+import random
 import logging
 import threading
 import requests
@@ -383,10 +384,13 @@ def scan_markets(active_token_ids: set) -> list:
 # ── Order Placement ───────────────────────────────────────────────────────────
 
 STALE_ORDER_MINUTES = int(os.getenv("STALE_MINUTES", "30"))
+MIN_BOOK_USD = float(os.getenv("MIN_BOOK_USD", "100"))
+RANGE_LO = 0.05
+RANGE_HI = 0.50
 
 
 def score_market(token_id: str, client: ClobClient, label: str = "") -> dict | None:
-    """Score a market's order book quality. Returns None and blacklists junk."""
+    """Score by real $ liquidity on bid + ask side within our trading range."""
     tag = label[:30] if label else token_id[:12]
     try:
         book = client.get_order_book(token_id)
@@ -400,45 +404,37 @@ def score_market(token_id: str, client: ClobClient, label: str = "") -> dict | N
         if not bids or not asks:
             blacklisted_tokens.add(token_id)
             save_blacklist(blacklisted_tokens)
-            log.info("REJECT %s: no bids/asks", tag)
             return None
 
-        if best_bid < 0.02:
-            blacklisted_tokens.add(token_id)
-            save_blacklist(blacklisted_tokens)
-            log.info("REJECT %s: bid $%.3f < $0.02", tag, best_bid)
+        bid_usd = 0.0
+        for b in bids:
+            p = float(b.price)
+            if RANGE_LO <= p <= RANGE_HI:
+                bid_usd += p * float(b.size)
+
+        ask_usd = 0.0
+        for a in asks:
+            p = float(a.price)
+            if RANGE_LO <= p <= BUY_BELOW:
+                ask_usd += p * float(a.size)
+
+        if bid_usd < MIN_BOOK_USD:
+            log.info("REJECT %s: bid$$%.0f < $%.0f in range (best_bid=$%.2f)",
+                     tag, bid_usd, MIN_BOOK_USD, best_bid)
             return None
 
-        spread = (best_ask - best_bid) / best_ask if best_ask > 0 else 1
-        if spread > 0.50:
-            log.info("REJECT %s: spread %.0f%% (bid=$%.3f ask=$%.3f)",
-                     tag, spread * 100, best_bid, best_ask)
+        if ask_usd < MIN_BOOK_USD:
+            log.info("REJECT %s: ask$$%.0f < $%.0f in range (best_ask=$%.2f)",
+                     tag, ask_usd, MIN_BOOK_USD, best_ask)
             return None
 
-        bid_depth = sum(float(b.size) * float(b.price) for b in bids[:5])
-        if bid_depth < BET_SIZE * 2:
-            log.info("REJECT %s: depth $%.1f < $%.0f",
-                     tag, bid_depth, BET_SIZE * 2)
-            return None
-
-        ask_depth = sum(float(a.size) * float(a.price) for a in asks[:5])
-        num_bids = len(bids)
-        num_asks = len(asks)
-
-        score = (
-            bid_depth * (1 - spread)
-            * (1 + min(ltp, 1))
-            * (1 + min(num_bids, 10) / 10)
-        )
+        score = min(bid_usd, ask_usd) * (bid_usd + ask_usd)
 
         return {
             "best_bid": best_bid,
             "best_ask": best_ask,
-            "spread": spread,
-            "bid_depth": bid_depth,
-            "ask_depth": ask_depth,
-            "num_bids": num_bids,
-            "num_asks": num_asks,
+            "bid_usd": bid_usd,
+            "ask_usd": ask_usd,
             "last_trade": ltp,
             "score": score,
         }
@@ -479,10 +475,10 @@ def place_buy(client: ClobClient, market: dict) -> dict | None:
     cost = round(price * size, 2)
 
     log.info(
-        "BUY: %s | %.0f @ $%.3f=$%.2f bid=$%.3f ask=$%.3f spd=%.0f%% dep=$%.0f score=%.0f",
+        "BUY: %s | %.0f @ $%.3f=$%.2f bid=$%.3f ask=$%.3f bid$$%.0f ask$$%.0f",
         market["question"][:30],
         size, price, cost, best_bid, best_ask,
-        info["spread"] * 100, info["bid_depth"], info["score"],
+        info["bid_usd"], info["ask_usd"],
     )
 
     try:
@@ -1275,7 +1271,6 @@ def run():
                 active_ids = {p["token_id"] for p in positions}
                 candidates = scan_markets(active_ids)
 
-                import random
                 check_pool = candidates[:200]
                 random.shuffle(check_pool)
                 check_pool = check_pool[:60]
@@ -1290,9 +1285,12 @@ def run():
                         break
 
                 scored.sort(key=lambda m: m["_score"]["score"], reverse=True)
-                log.info("Scored %d/%d candidates — top scores: %s",
+                log.info("Scored %d/%d — top: %s",
                          len(scored), len(check_pool),
-                         ", ".join(f"${m['_score']['score']:.0f}" for m in scored[:5]))
+                         " | ".join(
+                             f"bid${m['_score']['bid_usd']:.0f}/ask${m['_score']['ask_usd']:.0f}"
+                             for m in scored[:5]
+                         ))
 
                 filled = 0
                 for mkt in scored:
