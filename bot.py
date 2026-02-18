@@ -193,15 +193,17 @@ def close_position(pos: dict, exit_type: str, exit_price: float):
     """Move a position to closed list with P&L calculated."""
     cost = pos.get("cost", 0)
     size = pos.get("size", 0)
-    revenue = round(size * exit_price, 2) if exit_type == "sold" else round(size * exit_price, 2)
-    pnl = round(revenue - cost, 2)
+    no_cost = exit_type in ("expired", "cancelled")
+    actual_cost = 0 if no_cost else cost
+    revenue = round(size * exit_price, 2)
+    pnl = round(revenue - actual_cost, 2)
 
     closed = {
         "question": pos["question"],
         "buy_price": pos.get("buy_price", 0),
         "exit_price": exit_price,
         "size": size,
-        "cost": cost,
+        "cost": actual_cost,
         "revenue": revenue,
         "pnl": pnl,
         "exit_type": exit_type,
@@ -210,7 +212,8 @@ def close_position(pos: dict, exit_type: str, exit_price: float):
     }
 
     bot_state["closed_positions"].append(closed)
-    bot_state["total_returned"] += revenue
+    if not no_cost:
+        bot_state["total_returned"] += revenue
     save_closed(bot_state["closed_positions"])
 
 
@@ -822,6 +825,7 @@ td{padding:8px;font-size:0.8rem;border-bottom:1px solid #0e0e18}
 .st.sold{background:#1a3f2a;color:#22c55e}
 .st.claimed{background:#1a3f2a;color:#22c55e}
 .st.expired{background:#3f1a1a;color:#ef4444}
+.st.cancelled{background:#2a2a2a;color:#888}
 .pnl-pos{color:#22c55e;font-weight:600}
 .pnl-neg{color:#ef4444;font-weight:600}
 .pnl-zero{color:#888;font-weight:600}
@@ -1145,9 +1149,8 @@ def api_close():
 
         if pos["status"] == "pending":
             cancel_order(clob_client, pos["buy_order_id"])
-            actions.append("cancelled buy order")
-            current = get_current_price(token_id) or 0
-            close_position(pos, "manual", 0)
+            actions.append("cancelled buy order — USDC returned")
+            close_position(pos, "cancelled", 0)
 
         elif pos["status"] == "held":
             if pos.get("sell_order_id"):
@@ -1288,7 +1291,7 @@ def run():
     trade_history = load_trades()
     bot_state["closed_positions"] = load_closed()
     closed = bot_state["closed_positions"]
-    filled_closed = [c for c in closed if c.get("exit_type") not in ("expired",)]
+    filled_closed = [c for c in closed if c.get("exit_type") not in ("expired", "cancelled")]
     bot_state["total_returned"] = sum(c.get("revenue", 0) for c in filled_closed)
     bot_state["total_spent"] = (
         sum(c.get("cost", 0) for c in filled_closed) +
@@ -1326,7 +1329,7 @@ def run():
                         log.info("AUTO-CANCEL: %s (pending %.0f min)",
                                  pos["question"][:40], age_min)
                         cancel_order(clob, pos["buy_order_id"])
-                        close_position(pos, "expired", 0)
+                        close_position(pos, "cancelled", 0)
                         pos["status"] = "done"
 
             # 2. Check pending buys — if filled, place sell
@@ -1384,6 +1387,24 @@ def run():
             positions = [p for p in positions if p["status"] != "done"]
             save_positions(positions)
             bot_state["positions"] = positions
+
+            # 5b. Cleanup orphaned CLOB orders (sell orders for closed positions)
+            try:
+                active_order_ids = set()
+                for p in positions:
+                    if p.get("buy_order_id"):
+                        active_order_ids.add(p["buy_order_id"])
+                    if p.get("sell_order_id"):
+                        active_order_ids.add(p["sell_order_id"])
+
+                clob_orders = clob.get_orders()
+                for o in clob_orders:
+                    if o.get("status") == "LIVE" and o.get("id") not in active_order_ids:
+                        cancel_order(clob, o["id"])
+                        log.info("CLEANUP: cancelled orphan %s order %s",
+                                 o.get("side", "?"), o.get("id", "")[:20])
+            except Exception as e:
+                log.debug("Order cleanup check failed: %s", e)
 
             # 6. Fill empty slots — score a batch, buy the best
             slots = MAX_BETS - len(positions)
