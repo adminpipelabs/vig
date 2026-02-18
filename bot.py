@@ -479,6 +479,34 @@ def place_sell(client: ClobClient, position: dict) -> bool:
         return False
 
 
+def get_current_price(token_id: str) -> float | None:
+    """Fetch the current mid-price for a token from the CLOB."""
+    try:
+        if clob_client:
+            book = clob_client.get_order_book(token_id)
+            if book:
+                bids = book.get("bids", [])
+                asks = book.get("asks", [])
+                best_bid = float(bids[0]["price"]) if bids else 0
+                best_ask = float(asks[0]["price"]) if asks else 0
+                if best_bid and best_ask:
+                    return round((best_bid + best_ask) / 2, 4)
+                return best_bid or best_ask or None
+    except Exception:
+        pass
+    return None
+
+
+def cancel_order(client: ClobClient, order_id: str) -> bool:
+    """Cancel an open order."""
+    try:
+        result = client.cancel(order_id)
+        return bool(result)
+    except Exception as e:
+        log.error("Cancel failed for %s: %s", order_id, e)
+        return False
+
+
 def check_order_filled(client: ClobClient, order_id: str) -> bool:
     """Check if an order has been fully filled."""
     try:
@@ -589,6 +617,8 @@ td{padding:8px;font-size:0.8rem;border-bottom:1px solid #0e0e18}
 .badge.sell{background:#3f2a1a;color:#f59e0b}
 .badge.claim{background:#1a3f2a;color:#22c55e}
 .badge.withdraw{background:#2a1a3f;color:#c084fc}
+.badge.close{background:#3f1a1a;color:#ef4444}
+.st.manual{background:#3f1a1a;color:#ef4444}
 .wf{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 input,button{font-family:inherit;font-size:0.85rem;padding:8px 12px;border-radius:8px;border:1px solid #1e1e30;background:#0a0a0f;color:#e0e0e0}
 input{flex:1;min-width:120px}input:focus{outline:none;border-color:#3b82f6}
@@ -604,6 +634,7 @@ button:hover{background:#2563eb}button:disabled{opacity:.5;cursor:not-allowed}
 .tab{padding:6px 14px;border-radius:6px;font-size:0.78rem;cursor:pointer;background:#0a0a0f;border:1px solid #1e1e30;color:#888}
 .tab.active{background:#1e3a5f;color:#60a5fa;border-color:#2e4a6f}
 .tab .cnt{font-size:0.68rem;margin-left:4px;opacity:.7}
+.cbtn{background:#ef4444;border:none;color:white;padding:3px 8px;border-radius:4px;font-size:0.7rem;cursor:pointer;font-weight:600}.cbtn:hover{background:#dc2626}
 @media(max-width:600px){.cards{grid-template-columns:1fr 1fr}.trunc{max-width:110px}}
 </style>
 </head>
@@ -699,10 +730,13 @@ async function refresh(){
     const pe=document.getElementById('panelOpen');
     if(!d.positions.length){pe.innerHTML='<div class="empty">No open bets</div>'}
     else{
-      let h='<table><tr><th>Market</th><th>Shares</th><th>Buy Price</th><th>Cost</th><th>Target</th><th>Status</th></tr>';
-      d.positions.forEach(p=>{
+      let h='<table><tr><th>Market</th><th>Shares</th><th>Buy</th><th>Now</th><th>Cost</th><th>Target</th><th>Status</th><th></th></tr>';
+      d.positions.forEach((p,i)=>{
         const st=p.status||'buying';
-        h+=`<tr><td class="trunc">${p.question}</td><td>${(p.size||0).toFixed(0)}</td><td>$${(p.buy_price||0).toFixed(3)}</td><td>$${(p.cost||0).toFixed(2)}</td><td>$${(p.sell_target||0).toFixed(2)}</td><td><span class="st ${st}">${st}</span></td></tr>`;
+        const now=p.current_price?'$'+p.current_price.toFixed(3):'--';
+        const cp=p.current_price||0;const bp=p.buy_price||0;
+        const nc=cp>bp?'pnl-pos':cp<bp?'pnl-neg':'';
+        h+=`<tr><td class="trunc">${p.question}</td><td>${(p.size||0).toFixed(0)}</td><td>$${bp.toFixed(3)}</td><td class="${nc}">${now}</td><td>$${(p.cost||0).toFixed(2)}</td><td>$${(p.sell_target||0).toFixed(2)}</td><td><span class="st ${st}">${st}</span></td><td><button class="cbtn" onclick="closePos('${p.token_id}')">X</button></td></tr>`;
       });
       pe.innerHTML=h+'</table>';
     }
@@ -728,6 +762,7 @@ async function refresh(){
         const cls=t.type.toLowerCase();
         const det=t.type==='BUY'?'$'+(t.cost||0).toFixed(2)+' @ $'+(t.price||0).toFixed(2)
                   :t.type==='SELL'?(t.size||0).toFixed(0)+' shares @ $'+(t.price||0).toFixed(2)
+                  :t.type==='CLOSE'?'Manual close @ $'+(t.price||0).toFixed(3)
                   :t.type==='CLAIM'?'Redeemed':'Sent';
         h+=`<tr><td><span class="badge ${cls}">${t.type}</span></td><td class="trunc">${t.question||''}</td><td>${det}</td><td>${timeFmt(t.time)}</td></tr>`;
       });
@@ -757,6 +792,16 @@ async function doWithdraw(){
   btn.disabled=false;btn.textContent='Send';
 }
 
+async function closePos(tokenId){
+  if(!confirm('Close this position? This will cancel the order.'))return;
+  try{
+    const r=await fetch('/api/close',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token_id:tokenId})});
+    const d=await r.json();
+    if(d.success){alert('Position closed: '+d.message);refresh()}
+    else{alert('Error: '+d.error)}
+  }catch(e){alert('Request failed')}
+}
+
 refresh();
 setInterval(refresh,10000);
 </script>
@@ -771,6 +816,12 @@ def dashboard():
 
 @flask_app.route("/api/status")
 def api_status():
+    positions_with_prices = []
+    for p in bot_state["positions"]:
+        pp = dict(p)
+        pp["current_price"] = get_current_price(p["token_id"])
+        positions_with_prices.append(pp)
+
     return jsonify({
         "running": bot_state["running"],
         "started_at": bot_state["started_at"],
@@ -780,7 +831,7 @@ def api_status():
         "gas_balance": get_matic_balance(),
         "active_positions": len(bot_state["positions"]),
         "max_bets": MAX_BETS,
-        "positions": bot_state["positions"],
+        "positions": positions_with_prices,
         "total_buys": bot_state["total_buys"],
         "total_sells": bot_state["total_sells"],
         "total_spent": bot_state["total_spent"],
@@ -837,6 +888,58 @@ def api_withdraw():
             return jsonify({"success": True, "tx_hash": tx_hash.hex()})
         else:
             return jsonify({"success": False, "error": "Transaction reverted"})
+
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@flask_app.route("/api/close", methods=["POST"])
+def api_close():
+    if not clob_client:
+        return jsonify({"success": False, "error": "Bot not initialized"})
+
+    data = flask_request.get_json()
+    token_id = data.get("token_id", "").strip()
+
+    if not token_id:
+        return jsonify({"success": False, "error": "No token_id provided"})
+
+    pos = None
+    for p in bot_state["positions"]:
+        if p["token_id"] == token_id:
+            pos = p
+            break
+
+    if not pos:
+        return jsonify({"success": False, "error": "Position not found"})
+
+    try:
+        cancelled = []
+        if pos.get("buy_order_id") and pos["status"] == "buying":
+            cancel_order(clob_client, pos["buy_order_id"])
+            cancelled.append("buy order")
+
+        if pos.get("sell_order_id") and pos["status"] == "selling":
+            cancel_order(clob_client, pos["sell_order_id"])
+            cancelled.append("sell order")
+
+        current = get_current_price(token_id) or pos.get("buy_price", 0)
+        close_position(pos, "manual", current)
+        pos["status"] = "done"
+
+        add_trade({
+            "type": "CLOSE",
+            "question": pos["question"][:80],
+            "price": current,
+            "time": datetime.now(timezone.utc).isoformat(),
+        })
+
+        bot_state["positions"] = [p for p in bot_state["positions"] if p["status"] != "done"]
+        save_positions(bot_state["positions"])
+
+        msg = f"Cancelled {', '.join(cancelled)}" if cancelled else "Position closed"
+        log.info("Manual close: %s", pos["question"][:50])
+        return jsonify({"success": True, "message": msg})
 
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
