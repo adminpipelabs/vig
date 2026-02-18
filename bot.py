@@ -865,7 +865,7 @@ async function refresh(){
         const upnl=bid?(bid*sz)-(p.cost||0):0;
         const upnlStr=bid?'$'+pnlStr(upnl):'--';
         const upnlCls=bid?pnlClass(upnl):'';
-        h+=`<tr><td class="trunc">${p.question}</td><td>${sz.toFixed(0)}</td><td>$${bp.toFixed(3)}</td><td class="${bc}">${bidStr}</td><td class="${ac}">${askStr}</td><td class="${upnlCls}">${upnlStr}</td><td>$${(p.sell_target||0).toFixed(2)}</td><td><span class="st ${st}">${st}</span></td><td><button class="cbtn" onclick="closePos('${p.token_id}')">\u2715</button></td></tr>`;
+        h+=`<tr><td class="trunc">${p.question}</td><td>${sz.toFixed(0)}</td><td>$${bp.toFixed(3)}</td><td class="${bc}">${bidStr}</td><td class="${ac}">${askStr}</td><td class="${upnlCls}">${upnlStr}</td><td>$${(p.sell_target||0).toFixed(2)}</td><td><span class="st ${st}">${st}</span></td><td><button class="cbtn" onclick="closePos('${p.token_id}','${st}',${bid},${sz},${bp})">\u2715</button></td></tr>`;
       });
       pe.innerHTML=h+'</table>';
     }
@@ -920,8 +920,13 @@ async function doWithdraw(){
   btn.disabled=false;btn.textContent='Send';
 }
 
-async function closePos(tokenId){
-  if(!confirm('Close this position? This will cancel the order.'))return;
+async function closePos(tokenId,status,bid,sz,bp){
+  let msg;
+  if(status==='held'){
+    const rev=(bid*sz).toFixed(2);const pnl=(bid*sz-bp*sz).toFixed(2);
+    msg=`SELL ${sz.toFixed(0)} shares at bid $${bid.toFixed(3)}?\n\nReturn: ~$${rev}\nP&L: $${pnl}`;
+  }else{msg='Cancel this pending buy order?'}
+  if(!confirm(msg))return;
   try{
     const r=await fetch('/api/close',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token_id:tokenId})});
     const d=await r.json();
