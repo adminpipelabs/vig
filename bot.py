@@ -31,15 +31,24 @@ import httpx
 
 load_dotenv()
 
-# Route py-clob-client's httpx requests through residential proxy
-_PROXY_URL = os.getenv("RESIDENTIAL_PROXY_URL") or os.getenv("PROXY_URL")
+# Route py-clob-client's httpx requests through residential proxy (non-US exit)
+_RAW_PROXY = os.getenv("RESIDENTIAL_PROXY_URL") or os.getenv("PROXY_URL") or ""
+if _RAW_PROXY and "-country-" not in _RAW_PROXY:
+    _PROXY_URL = _RAW_PROXY.replace("residential_proxy1:", "residential_proxy1-country-gb:")
+else:
+    _PROXY_URL = _RAW_PROXY
+
 if _PROXY_URL:
+    print(f"[PROXY] Routing CLOB via: {_PROXY_URL[:40]}...", flush=True)
     _OrigClient = httpx.Client
     class _ProxiedClient(_OrigClient):
         def __init__(self, **kwargs):
-            kwargs.setdefault("proxy", _PROXY_URL)
+            if "proxy" not in kwargs and "proxies" not in kwargs:
+                kwargs["proxy"] = _PROXY_URL
             super().__init__(**kwargs)
     httpx.Client = _ProxiedClient
+else:
+    print("[PROXY] No proxy configured — CLOB may be geoblocked", flush=True)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
