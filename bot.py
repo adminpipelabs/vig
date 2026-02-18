@@ -334,6 +334,9 @@ def _parse_market_candidates(markets: list, active_token_ids: set) -> list:
                 if tid in active_token_ids:
                     continue
 
+                if p < BUY_MIN * 0.5 or p > BUY_MAX * 1.5:
+                    continue
+
                 question = market.get("question", "Unknown")
                 outcome_name = str(outcome_list[i])
                 label = f"{question} → {outcome_name}"
