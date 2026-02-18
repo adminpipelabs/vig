@@ -24,7 +24,8 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, Side
+from py_clob_client.clob_types import OrderArgs
+from py_clob_client.order_builder.constants import BUY
 from py_clob_client.constants import POLYGON
 
 from web3 import Web3
@@ -226,7 +227,7 @@ def place_bet(client: ClobClient, market: dict) -> dict | None:
             token_id=token_id,
             price=round(price, 4),
             size=BET_SIZE,
-            side=Side.BUY,
+            side=BUY,
         )
         result = client.create_and_post_order(args)
         order_id = result.get("orderID", "?")
