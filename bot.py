@@ -493,26 +493,31 @@ def place_sell(client: ClobClient, position: dict) -> bool:
         return False
 
 
-def get_current_price(token_id: str) -> float | None:
-    """Fetch the last trade price or mid-price for a token from the CLOB."""
+def get_price_info(token_id: str) -> dict:
+    """Fetch last trade price and best bid/ask for a token."""
+    info = {"last_trade": None, "best_bid": None, "best_ask": None}
     try:
         if clob_client:
             book = clob_client.get_order_book(token_id)
             if book:
                 ltp = getattr(book, "last_trade_price", None)
                 if ltp and float(ltp) > 0:
-                    return round(float(ltp), 4)
+                    info["last_trade"] = round(float(ltp), 4)
 
                 bids = getattr(book, "bids", [])
                 asks = getattr(book, "asks", [])
-                best_bid = float(bids[0].price) if bids else 0
-                best_ask = float(asks[0].price) if asks else 0
-                if best_bid and best_ask:
-                    return round((best_bid + best_ask) / 2, 4)
-                return best_bid or best_ask or None
+                if bids:
+                    info["best_bid"] = round(float(bids[0].price), 4)
+                if asks:
+                    info["best_ask"] = round(float(asks[0].price), 4)
     except Exception:
         pass
-    return None
+    return info
+
+
+def get_current_price(token_id: str) -> float | None:
+    """Shortcut: return last trade price."""
+    return get_price_info(token_id).get("last_trade")
 
 
 def cancel_order(client: ClobClient, order_id: str) -> bool:
@@ -748,17 +753,20 @@ async function refresh(){
     const pe=document.getElementById('panelOpen');
     if(!d.positions.length){pe.innerHTML='<div class="empty">No open bets</div>'}
     else{
-      let h='<table><tr><th>Market</th><th>Shares</th><th>Buy</th><th>Now</th><th>P&L</th><th>Target</th><th>Status</th><th></th></tr>';
+      let h='<table><tr><th>Market</th><th>Shares</th><th>Buy</th><th>Last</th><th>Bid</th><th>P&L</th><th>Target</th><th>Status</th><th></th></tr>';
       d.positions.forEach((p,i)=>{
         const st=p.status||'pending';
         const cp=p.current_price||0;const bp=p.buy_price||0;const sz=p.size||0;
-        const now=cp?'$'+cp.toFixed(3):'--';
+        const bid=p.best_bid||0;
+        const last=cp?'$'+cp.toFixed(3):'--';
+        const bidStr=bid?'$'+bid.toFixed(3):'--';
         const nc=cp>bp?'pnl-pos':cp<bp?'pnl-neg':'';
-        const upnl=cp?(cp*sz)-(p.cost||0):0;
-        const upnlStr=cp?'$'+pnlStr(upnl):'--';
-        const upnlCls=cp?pnlClass(upnl):'';
-        const stLabel=st==='pending'?'pending':st==='held'?'held':'done';
-        h+=`<tr><td class="trunc">${p.question}</td><td>${sz.toFixed(0)}</td><td>$${bp.toFixed(3)}</td><td class="${nc}">${now}</td><td class="${upnlCls}">${upnlStr}</td><td>$${(p.sell_target||0).toFixed(2)}</td><td><span class="st ${st}">${stLabel}</span></td><td><button class="cbtn" onclick="closePos('${p.token_id}')">\u2715</button></td></tr>`;
+        const bc=bid>bp?'pnl-pos':bid<bp?'pnl-neg':'';
+        const sellVal=bid>bp?bid:cp;
+        const upnl=sellVal?(sellVal*sz)-(p.cost||0):0;
+        const upnlStr=sellVal?'$'+pnlStr(upnl):'--';
+        const upnlCls=sellVal?pnlClass(upnl):'';
+        h+=`<tr><td class="trunc">${p.question}</td><td>${sz.toFixed(0)}</td><td>$${bp.toFixed(3)}</td><td class="${nc}">${last}</td><td class="${bc}">${bidStr}</td><td class="${upnlCls}">${upnlStr}</td><td>$${(p.sell_target||0).toFixed(2)}</td><td><span class="st ${st}">${st}</span></td><td><button class="cbtn" onclick="closePos('${p.token_id}')">\u2715</button></td></tr>`;
       });
       pe.innerHTML=h+'</table>';
     }
@@ -841,7 +849,10 @@ def api_status():
     positions_with_prices = []
     for p in bot_state["positions"]:
         pp = dict(p)
-        pp["current_price"] = get_current_price(p["token_id"])
+        pi = get_price_info(p["token_id"])
+        pp["current_price"] = pi["last_trade"]
+        pp["best_bid"] = pi["best_bid"]
+        pp["best_ask"] = pi["best_ask"]
         positions_with_prices.append(pp)
 
     return jsonify({
