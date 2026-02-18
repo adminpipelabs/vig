@@ -398,8 +398,8 @@ def score_market(token_id: str, client: ClobClient, label: str = "") -> dict | N
         asks = getattr(book, "asks", [])
         ltp = float(getattr(book, "last_trade_price", 0) or 0)
 
-        best_bid = float(bids[0].price) if bids else 0
-        best_ask = float(asks[0].price) if asks else 0
+        best_bid = float(bids[-1].price) if bids else 0
+        best_ask = float(asks[-1].price) if asks else 0
         n_bids = len(bids)
         n_asks = len(asks)
 
@@ -539,7 +539,7 @@ def place_sell(client: ClobClient, position: dict) -> bool:
     try:
         book = client.get_order_book(token_id)
         bids = getattr(book, "bids", [])
-        best_bid = float(bids[0].price) if bids else 0
+        best_bid = float(bids[-1].price) if bids else 0
 
         if best_bid > sell_price:
             sell_price = min(best_bid + tick, 0.99)
@@ -609,9 +609,9 @@ def get_price_info(token_id: str) -> dict:
                 bids = getattr(book, "bids", [])
                 asks = getattr(book, "asks", [])
                 if bids:
-                    info["best_bid"] = round(float(bids[0].price), 4)
+                    info["best_bid"] = round(float(bids[-1].price), 4)
                 if asks:
-                    info["best_ask"] = round(float(asks[0].price), 4)
+                    info["best_ask"] = round(float(asks[-1].price), 4)
     except Exception:
         pass
     return info
@@ -1073,13 +1073,13 @@ def api_close():
 
             good_bids = [b for b in bids if float(b.price) >= buy_price]
             if good_bids:
-                sell_price = float(good_bids[0].price)
+                sell_price = float(good_bids[-1].price)
             elif ltp >= buy_price:
                 sell_price = round(ltp * 0.95, 4)
             else:
                 return jsonify({"success": False,
                     "error": f"No buyers above your buy price (${buy_price:.3f}). "
-                             f"Best bid: ${float(bids[0].price):.3f}" if bids else "No bids at all"})
+                             f"Best bid: ${float(bids[-1].price):.3f}" if bids else "No bids at all"})
 
             sell_args = OrderArgs(
                 token_id=token_id,
