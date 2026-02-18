@@ -23,7 +23,7 @@ from dotenv import load_dotenv
 from flask import Flask, request as flask_request, jsonify, Response
 
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, OrderType, CreateOrderOptions
+from py_clob_client.clob_types import OrderArgs, OrderType, CreateOrderOptions, BalanceAllowanceParams, AssetType
 from py_clob_client.order_builder.constants import BUY, SELL
 from py_clob_client.constants import POLYGON
 
@@ -220,6 +220,16 @@ def build_clob_client() -> ClobClient:
     client = ClobClient(host=CLOB_HOST, key=PRIVATE_KEY, chain_id=POLYGON)
     client.set_api_creds(client.create_or_derive_api_creds())
     log.info("CLOB ready. Address: %s", client.get_address())
+
+    try:
+        collateral = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+        conditional = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL))
+        log.info("Allowances — USDC: %s  Conditional: %s", collateral, conditional)
+        client.set_allowances()
+        log.info("Allowances set for USDC + conditional tokens")
+    except Exception as e:
+        log.warning("Could not set allowances: %s", e)
+
     return client
 
 
