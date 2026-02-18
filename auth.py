@@ -122,10 +122,12 @@ class PolymarketUSAuth:
         # Timestamp in milliseconds
         timestamp = str(int(time.time() * 1000))
         
-        # Message format: timestamp + method + path
-        message = f"{timestamp}{method.upper()}{path}".encode('utf-8')
+        # Message format: timestamp + method + path (per Polymarket API docs)
+        # Method should be uppercase (GET, POST, etc.)
+        method_upper = method.upper()
+        message = f"{timestamp}{method_upper}{path}".encode('utf-8')
         
-        # Sign message
+        # Sign message with Ed25519 private key
         signature_bytes = self.sign_message(message)
         signature_b64 = base64.b64encode(signature_bytes).decode('utf-8')
         
