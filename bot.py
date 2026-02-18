@@ -214,9 +214,9 @@ def scan_markets(active_token_ids: set) -> list:
             params={
                 "closed": "false",
                 "limit": 100,
-                "order": "volume_num",
+                "order": "volumeNum",
                 "ascending": "false",
-                "volume_num_min": str(MIN_VOLUME),
+                "volume_num_min": int(MIN_VOLUME),
             },
             timeout=10,
         )
