@@ -266,75 +266,94 @@ def get_matic_balance() -> float:
 
 # ── Market Scanner ────────────────────────────────────────────────────────────
 
-def scan_markets(active_token_ids: set) -> list:
-    """Find high-volume markets with outcomes priced below BUY_BELOW."""
-    qualifying = []
+def _parse_market_candidates(markets: list, active_token_ids: set) -> list:
+    """Extract qualifying outcomes from a list of market dicts."""
+    found = []
+    for market in markets:
+        try:
+            tokens = market.get("clobTokenIds")
+            outcome_prices = market.get("outcomePrices")
+            outcomes = market.get("outcomes")
 
-    try:
-        resp = requests.get(
-            f"{GAMMA_API}/markets",
-            params={
-                "closed": "false",
-                "limit": 100,
-                "order": "volumeNum",
-                "ascending": "false",
-                "volume_num_min": int(MIN_VOLUME),
-            },
-            timeout=10,
-        )
-        resp.raise_for_status()
-        markets = resp.json()
-
-        for market in markets:
-            try:
-                tokens = market.get("clobTokenIds")
-                outcome_prices = market.get("outcomePrices")
-                outcomes = market.get("outcomes")
-
-                if not tokens or not outcome_prices or not outcomes:
-                    continue
-
-                try:
-                    token_list = json.loads(tokens) if isinstance(tokens, str) else tokens
-                    price_list = json.loads(outcome_prices) if isinstance(outcome_prices, str) else outcome_prices
-                    outcome_list = json.loads(outcomes) if isinstance(outcomes, str) else outcomes
-                except (json.JSONDecodeError, TypeError):
-                    continue
-
-                volume = float(market.get("volumeNum") or market.get("volume") or 0)
-
-                for i in range(min(len(token_list), len(price_list), len(outcome_list))):
-                    p = float(price_list[i])
-                    tid = token_list[i]
-
-                    if p > BUY_BELOW or p < 0.05:
-                        continue
-                    if tid in active_token_ids:
-                        continue
-
-                    question = market.get("question", "Unknown")
-                    outcome_name = str(outcome_list[i])
-                    label = f"{question} → {outcome_name}"
-
-                    qualifying.append({
-                        "market_id": market.get("id"),
-                        "question": label,
-                        "token_id": tid,
-                        "condition_id": market.get("conditionId"),
-                        "price": p,
-                        "volume": volume,
-                        "tick_size": market.get("orderPriceMinTickSize", 0.01),
-                        "neg_risk": bool(market.get("negRisk")),
-                    })
-
-            except Exception as e:
-                log.debug("Skipped market: %s", e)
+            if not tokens or not outcome_prices or not outcomes:
                 continue
 
-        log.info("Scan — %d candidates (from %d markets)", len(qualifying), len(markets))
+            try:
+                token_list = json.loads(tokens) if isinstance(tokens, str) else tokens
+                price_list = json.loads(outcome_prices) if isinstance(outcome_prices, str) else outcome_prices
+                outcome_list = json.loads(outcomes) if isinstance(outcomes, str) else outcomes
+            except (json.JSONDecodeError, TypeError):
+                continue
 
-    except Exception as e:
-        log.error("Scan failed: %s", e)
+            volume = float(market.get("volumeNum") or market.get("volume") or 0)
+
+            for i in range(min(len(token_list), len(price_list), len(outcome_list))):
+                p = float(price_list[i])
+                tid = token_list[i]
+
+                if p > BUY_BELOW or p < 0.01:
+                    continue
+                if tid in active_token_ids:
+                    continue
+
+                question = market.get("question", "Unknown")
+                outcome_name = str(outcome_list[i])
+                label = f"{question} → {outcome_name}"
+
+                found.append({
+                    "market_id": market.get("id"),
+                    "question": label,
+                    "token_id": tid,
+                    "condition_id": market.get("conditionId"),
+                    "price": p,
+                    "volume": volume,
+                    "tick_size": market.get("orderPriceMinTickSize", 0.01),
+                    "neg_risk": bool(market.get("negRisk")),
+                })
+
+        except Exception as e:
+            log.debug("Skipped market: %s", e)
+            continue
+    return found
+
+
+def scan_markets(active_token_ids: set) -> list:
+    """Scan all open markets, paginating through everything."""
+    seen_tokens = set()
+    qualifying = []
+    total_scanned = 0
+    offset = 0
+    page_size = 100
+
+    while True:
+        try:
+            resp = requests.get(
+                f"{GAMMA_API}/markets",
+                params={"closed": "false", "limit": page_size, "offset": offset},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            markets = resp.json()
+
+            if not markets:
+                break
+
+            total_scanned += len(markets)
+
+            for c in _parse_market_candidates(markets, active_token_ids):
+                if c["token_id"] not in seen_tokens:
+                    seen_tokens.add(c["token_id"])
+                    qualifying.append(c)
+
+            if len(markets) < page_size:
+                break
+            offset += page_size
+
+        except Exception as e:
+            log.error("Scan page failed (offset %d): %s", offset, e)
+            break
+
+    log.info("Scan — %d candidates (from %d total markets)", len(qualifying), total_scanned)
 
     qualifying.sort(key=lambda m: m["volume"], reverse=True)
     return qualifying
