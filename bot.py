@@ -65,12 +65,13 @@ log = logging.getLogger("vig")
 PRIVATE_KEY     = os.getenv("PRIVATE_KEY")
 RPC_URL         = os.getenv("RPC_URL", "https://polygon-rpc.com")
 
-MAX_BETS        = int(os.getenv("MAX_BETS", "10"))
-BET_SIZE        = float(os.getenv("BET_SIZE", "5"))
-BUY_BELOW       = float(os.getenv("BUY_BELOW", "0.25"))
-SELL_AT         = float(os.getenv("SELL_AT", "0.40"))
-MIN_VOLUME      = float(os.getenv("MIN_VOLUME", "10000"))
-POLL_SECONDS    = int(os.getenv("POLL_SECONDS", "120"))
+MAX_BETS        = int(os.getenv("MAX_BETS", "999"))
+BET_SIZE        = float(os.getenv("BET_SIZE", "10"))
+BUY_MIN         = float(os.getenv("BUY_MIN", "0.25"))
+BUY_MAX         = float(os.getenv("BUY_MAX", "0.40"))
+PROFIT_PCT      = float(os.getenv("PROFIT_PCT", "0.05"))
+MAX_SPREAD_PCT  = float(os.getenv("MAX_SPREAD_PCT", "0.02"))
+POLL_SECONDS    = int(os.getenv("POLL_SECONDS", "30"))
 PORT            = int(os.getenv("PORT", "8080"))
 
 CLOB_HOST       = "https://clob.polymarket.com"
@@ -381,17 +382,14 @@ def scan_markets(active_token_ids: set) -> list:
 
 # ── Order Placement ───────────────────────────────────────────────────────────
 
-STALE_ORDER_MINUTES = int(os.getenv("STALE_MINUTES", "30"))
+STALE_ORDER_MINUTES = int(os.getenv("STALE_MINUTES", "10"))
 
 
 def score_market(token_id: str, client: ClobClient, label: str = "") -> dict | None:
     """
-    Flip the scammers' playbook:
-    - Find markets with real order books (multiple bid/ask levels)
-    - We place limit buys at OUR price — we're the smart bid
-    - Score by: bid depth, number of levels, last trade recency
+    Find tight-spread markets priced $0.25-$0.40.
+    Spread must be <= 1% of price. Score by depth and tightness.
     """
-    tag = label[:30] if label else token_id[:12]
     try:
         book = client.get_order_book(token_id)
         bids = getattr(book, "bids", [])
@@ -400,42 +398,35 @@ def score_market(token_id: str, client: ClobClient, label: str = "") -> dict | N
 
         best_bid = float(bids[-1].price) if bids else 0
         best_ask = float(asks[-1].price) if asks else 0
-        n_bids = len(bids)
-        n_asks = len(asks)
 
-        if n_bids < 2 or n_asks < 1:
+        if not bids or not asks:
             return None
-
-        if best_ask > BUY_BELOW:
+        if best_ask < BUY_MIN or best_ask > BUY_MAX:
             return None
-        if best_ask < 0.02:
-            return None
-        if best_bid < 0.01:
+        if best_bid < BUY_MIN * 0.8:
             return None
 
         spread = best_ask - best_bid
-        all_bid_usd = sum(float(b.price) * float(b.size) for b in bids)
-        all_ask_usd = sum(float(a.price) * float(a.size) for a in asks)
+        spread_pct = spread / best_ask if best_ask > 0 else 1
+        if spread_pct > MAX_SPREAD_PCT:
+            return None
 
-        score = (
-            (all_bid_usd + 1)
-            * (1 + min(n_bids, 20) / 5)
-            * (1 + min(all_ask_usd, 500) / 100)
-            * max(0.01, 1 - spread)
-        )
+        all_bid_usd = sum(float(b.price) * float(b.size) for b in bids)
+
+        score = all_bid_usd / max(spread_pct, 0.0001)
 
         return {
             "best_bid": best_bid,
             "best_ask": best_ask,
             "all_bid_usd": all_bid_usd,
-            "all_ask_usd": all_ask_usd,
-            "n_bids": n_bids,
-            "n_asks": n_asks,
+            "n_bids": len(bids),
+            "n_asks": len(asks),
             "spread": spread,
+            "spread_pct": spread_pct,
             "last_trade": ltp,
             "score": score,
         }
-    except Exception as e:
+    except Exception:
         return None
 
 
@@ -453,38 +444,41 @@ def place_buy(client: ClobClient, market: dict) -> dict | None:
 
     best_bid = info["best_bid"]
     best_ask = info["best_ask"]
+    spread = info["spread"]
 
-    price = round(best_bid + tick, 2)
-    if price > best_ask:
-        price = best_ask
-    if price > BUY_BELOW:
-        price = BUY_BELOW
-    if price < 0.02:
+    price = best_ask
+    if price < BUY_MIN or price > BUY_MAX:
         return None
 
     size = round(BET_SIZE / price, 2)
     cost = round(price * size, 2)
 
     log.info(
-        "BID: %s | %.0f@$%.2f=$%.2f bid=$%.2f ask=$%.2f spread=$%.3f depth=$%.0f",
+        "BUY: %s | %.0f@$%.3f=$%.2f bid=$%.3f ask=$%.3f spd=$%.3f depth=$%.0f",
         market["question"][:30],
-        size, price, cost, best_bid, best_ask, best_ask - best_bid, info["all_bid_usd"],
+        size, price, cost, best_bid, best_ask, spread, info["all_bid_usd"],
     )
 
     try:
         buy_args = OrderArgs(
             token_id=token_id,
-            price=price,
+            price=round(price, 4),
             size=size,
             side=BUY,
         )
         opts = CreateOrderOptions(tick_size=str(tick), neg_risk=neg_risk)
 
         signed = client.create_order(buy_args, options=opts)
-        result = client.post_order(signed, OrderType.GTC)
+        result = client.post_order(signed, OrderType.FOK)
 
         order_id = result.get("orderID", "")
         filled = result.get("status") in ("MATCHED", "FILLED")
+
+        if not filled or not order_id:
+            signed2 = client.create_order(buy_args, options=opts)
+            result = client.post_order(signed2, OrderType.GTC)
+            order_id = result.get("orderID", "")
+            filled = result.get("status") in ("MATCHED", "FILLED")
 
         if not order_id:
             if result.get("errorMsg"):
@@ -502,7 +496,7 @@ def place_buy(client: ClobClient, market: dict) -> dict | None:
             "token_id": token_id,
             "condition_id": market["condition_id"],
             "buy_price": price,
-            "sell_target": SELL_AT,
+            "sell_target": round(min(price * (1 + PROFIT_PCT), 0.99), 4),
             "size": size,
             "cost": cost,
             "tick_size": tick,
@@ -540,7 +534,7 @@ def place_sell(client: ClobClient, position: dict) -> bool:
     neg_risk = position.get("neg_risk", False)
     buy_price = position.get("buy_price", 0)
 
-    sell_price = SELL_AT
+    sell_price = position.get("sell_target") or round(buy_price * (1 + PROFIT_PCT), 4)
 
     try:
         book = client.get_order_book(token_id)
@@ -549,10 +543,6 @@ def place_sell(client: ClobClient, position: dict) -> bool:
 
         if best_bid > sell_price:
             sell_price = min(best_bid + tick, 0.99)
-
-        min_profit = buy_price * 1.15
-        if sell_price < min_profit:
-            sell_price = max(sell_price, min_profit)
     except Exception:
         pass
 
@@ -560,9 +550,10 @@ def place_sell(client: ClobClient, position: dict) -> bool:
     position["sell_target"] = sell_price
 
     log.info(
-        "SELL: %s | %.0f shares @ $%.4f (bought $%.3f, target min $%.3f)",
+        "SELL: %s | %.0f shares @ $%.4f (bought $%.3f, +%.0f%%)",
         position["question"][:40],
-        size, sell_price, buy_price, SELL_AT,
+        size, sell_price, buy_price,
+        ((sell_price - buy_price) / buy_price * 100) if buy_price > 0 else 0,
     )
 
     try:
@@ -981,9 +972,9 @@ def api_status():
         "trades": trade_history[-30:],
         "config": {
             "bet_size": BET_SIZE,
-            "buy_below": BUY_BELOW,
-            "sell_at": SELL_AT,
-            "min_volume": MIN_VOLUME,
+            "buy_range": f"${BUY_MIN}-${BUY_MAX}",
+            "profit_target": f"{PROFIT_PCT*100:.0f}%",
+            "max_spread": f"{MAX_SPREAD_PCT*100:.1f}%",
             "poll_seconds": POLL_SECONDS,
         },
     })
@@ -1173,11 +1164,11 @@ def run():
 
     global clob_client
     log.info("Starting Vig swing bot")
-    log.info("Buy below    : $%.2f", BUY_BELOW)
-    log.info("Sell at      : $%.2f", SELL_AT)
+    log.info("Buy range    : $%.2f - $%.2f", BUY_MIN, BUY_MAX)
+    log.info("Profit target: %.0f%%", PROFIT_PCT * 100)
+    log.info("Max spread   : %.1f%%", MAX_SPREAD_PCT * 100)
     log.info("Bet size     : $%.0f", BET_SIZE)
     log.info("Max positions: %d", MAX_BETS)
-    log.info("Min volume   : $%.0f", MIN_VOLUME)
     log.info("Poll interval: %ds", POLL_SECONDS)
 
     clob = build_clob_client()
@@ -1235,7 +1226,7 @@ def run():
 
                 elif pos["status"] == "held":
                     if pos.get("sell_order_id") and check_order_filled(clob, pos["sell_order_id"]):
-                        actual_sell = pos.get("sell_target", SELL_AT)
+                        actual_sell = pos.get("sell_target", pos.get("buy_price", 0) * (1 + PROFIT_PCT))
                         log.info("Sell filled: %s @ $%.3f", pos["question"][:50], actual_sell)
                         pos["status"] = "done"
                         close_position(pos, "sold", actual_sell)
@@ -1252,10 +1243,11 @@ def run():
                 if pos["status"] == "held" and pos.get("sell_order_id"):
                     try:
                         info = score_market(pos["token_id"], clob, pos.get("question", ""))
-                        if info and info["best_bid"] > pos.get("sell_target", SELL_AT) * 1.05:
+                        cur_target = pos.get("sell_target", pos.get("buy_price", 0) * (1 + PROFIT_PCT))
+                        if info and info["best_bid"] > cur_target * 1.05:
                             new_target = min(info["best_bid"] + float(pos.get("tick_size", 0.01)), 0.99)
                             log.info("REPRICE: %s sell $%.3f → $%.3f (bid=$%.3f)",
-                                     pos["question"][:35], pos.get("sell_target", SELL_AT),
+                                     pos["question"][:35], cur_target,
                                      new_target, info["best_bid"])
                             cancel_order(clob, pos["sell_order_id"])
                             pos["sell_target"] = new_target
