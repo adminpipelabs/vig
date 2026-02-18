@@ -542,8 +542,18 @@ def place_buy(client: ClobClient, market: dict) -> dict | None:
 def place_sell(client: ClobClient, position: dict) -> bool:
     """Place a SELL limit order — uses dynamic pricing based on order book."""
     token_id = position["token_id"]
-    size = position["size"]
     tick = float(position.get("tick_size", 0.01))
+
+    real_bal = None
+    try:
+        bal_info = client.get_balance_allowance(
+            BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id))
+        raw = int(bal_info.get("balance", 0))
+        real_bal = raw / 1e6
+    except Exception:
+        pass
+    size = min(position["size"], real_bal) if real_bal else position["size"]
+    size = round(size, 2)
     neg_risk = position.get("neg_risk", False)
     buy_price = position.get("buy_price", 0)
 
@@ -1076,10 +1086,21 @@ def api_close():
                 cancel_order(clob_client, pos["sell_order_id"])
                 actions.append("cancelled sell order")
 
-            size = pos["size"]
             tick = float(pos.get("tick_size", 0.01))
             neg_risk = pos.get("neg_risk", False)
             buy_price = pos.get("buy_price", 0)
+
+            real_bal = None
+            try:
+                bal_info = clob_client.get_balance_allowance(
+                    BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id))
+                raw = int(bal_info.get("balance", 0))
+                real_bal = raw / 1e6
+            except Exception:
+                pass
+
+            size = min(pos["size"], real_bal) if real_bal else pos["size"]
+            size = round(size, 2)
 
             book = clob_client.get_order_book(token_id)
             bids = getattr(book, "bids", [])
