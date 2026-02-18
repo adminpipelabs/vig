@@ -385,8 +385,9 @@ def scan_markets(active_token_ids: set) -> list:
 STALE_ORDER_MINUTES = int(os.getenv("STALE_MINUTES", "30"))
 
 
-def score_market(token_id: str, client: ClobClient) -> dict | None:
+def score_market(token_id: str, client: ClobClient, label: str = "") -> dict | None:
     """Score a market's order book quality. Returns None and blacklists junk."""
+    tag = label[:30] if label else token_id[:12]
     try:
         book = client.get_order_book(token_id)
         bids = getattr(book, "bids", [])
@@ -399,65 +400,89 @@ def score_market(token_id: str, client: ClobClient) -> dict | None:
         if not bids or not asks:
             blacklisted_tokens.add(token_id)
             save_blacklist(blacklisted_tokens)
+            log.debug("REJECT %s: no bids/asks", tag)
             return None
 
         if best_bid < 0.02:
             blacklisted_tokens.add(token_id)
             save_blacklist(blacklisted_tokens)
+            log.debug("REJECT %s: bid $%.3f < $0.02", tag, best_bid)
             return None
 
         spread = (best_ask - best_bid) / best_ask if best_ask > 0 else 1
-        if spread > 0.5:
+        if spread > 0.50:
+            log.debug("REJECT %s: spread %.0f%% (bid=$%.3f ask=$%.3f)",
+                      tag, spread * 100, best_bid, best_ask)
             return None
 
         bid_depth = sum(float(b.size) * float(b.price) for b in bids[:5])
         if bid_depth < BET_SIZE * 2:
+            log.debug("REJECT %s: depth $%.1f < $%.0f",
+                      tag, bid_depth, BET_SIZE * 2)
             return None
 
-        score = bid_depth * (1 - spread) * (1 + ltp)
+        ask_depth = sum(float(a.size) * float(a.price) for a in asks[:5])
+        num_bids = len(bids)
+        num_asks = len(asks)
+
+        score = (
+            bid_depth * (1 - spread)
+            * (1 + min(ltp, 1))
+            * (1 + min(num_bids, 10) / 10)
+        )
 
         return {
             "best_bid": best_bid,
             "best_ask": best_ask,
             "spread": spread,
             "bid_depth": bid_depth,
+            "ask_depth": ask_depth,
+            "num_bids": num_bids,
+            "num_asks": num_asks,
             "last_trade": ltp,
             "score": score,
         }
-    except Exception:
+    except Exception as e:
+        log.debug("REJECT %s: error %s", tag, e)
         return None
 
 
 def place_buy(client: ClobClient, market: dict) -> dict | None:
-    """Place a BUY order — scores market quality, buys only good ones."""
+    """Place a BUY order — uses pre-scored data, enters at smart price."""
     token_id = market["token_id"]
-    price = market["price"]
     tick = float(market.get("tick_size", 0.01))
     neg_risk = market.get("neg_risk", False)
 
-    mkt_info = score_market(token_id, client)
-    if not mkt_info:
-        log.info("SKIP: %s — failed quality checks", market["question"][:45])
+    info = market.get("_score")
+    if not info:
+        info = score_market(token_id, client, market["question"])
+        if not info:
+            log.info("SKIP: %s — failed quality checks", market["question"][:45])
+            return None
+
+    best_bid = info["best_bid"]
+    best_ask = info["best_ask"]
+
+    if best_ask > BUY_BELOW:
+        log.info("SKIP: %s — ask $%.3f > limit $%.2f",
+                 market["question"][:40], best_ask, BUY_BELOW)
         return None
 
-    best_bid = mkt_info["best_bid"]
-    best_ask = mkt_info["best_ask"]
+    entry = round(best_bid + tick, 4)
+    if entry >= best_ask and best_ask > 0:
+        entry = best_ask
+    if entry > BUY_BELOW:
+        entry = BUY_BELOW
 
-    if best_ask > 0 and best_ask <= BUY_BELOW:
-        price = best_ask
-    elif best_ask > BUY_BELOW:
-        log.info("SKIP: %s — ask $%.3f > buy limit $%.2f",
-                 market["question"][:45], best_ask, BUY_BELOW)
-        return None
-
+    price = entry
     size = round(BET_SIZE / price, 2)
     cost = round(price * size, 2)
 
     log.info(
-        "BUY: %s | %.0f @ $%.3f=$%.2f bid=$%.3f ask=$%.3f spread=%.0f%% depth=$%.0f",
-        market["question"][:35],
+        "BUY: %s | %.0f @ $%.3f=$%.2f bid=$%.3f ask=$%.3f spd=%.0f%% dep=$%.0f score=%.0f",
+        market["question"][:30],
         size, price, cost, best_bid, best_ask,
-        mkt_info["spread"] * 100, mkt_info["bid_depth"],
+        info["spread"] * 100, info["bid_depth"], info["score"],
     )
 
     try:
@@ -1214,7 +1239,7 @@ def run():
             for pos in positions:
                 if pos["status"] == "held" and pos.get("sell_order_id"):
                     try:
-                        info = score_market(pos["token_id"], clob)
+                        info = score_market(pos["token_id"], clob, pos.get("question", ""))
                         if info and info["best_bid"] > pos.get("sell_target", SELL_AT) * 1.05:
                             new_target = min(info["best_bid"] + float(pos.get("tick_size", 0.01)), 0.99)
                             log.info("REPRICE: %s sell $%.3f → $%.3f (bid=$%.3f)",
@@ -1242,7 +1267,7 @@ def run():
             save_positions(positions)
             bot_state["positions"] = positions
 
-            # 6. Fill empty slots with new buys
+            # 6. Fill empty slots — score a batch, buy the best
             slots = MAX_BETS - len(positions)
             log.info("Open slots: %d", slots)
 
@@ -1250,12 +1275,35 @@ def run():
                 active_ids = {p["token_id"] for p in positions}
                 candidates = scan_markets(active_ids)
 
-                for mkt in candidates[:slots]:
+                import random
+                check_pool = candidates[:200]
+                random.shuffle(check_pool)
+                check_pool = check_pool[:60]
+
+                scored = []
+                for mkt in check_pool:
+                    info = score_market(mkt["token_id"], clob, mkt["question"])
+                    if info:
+                        mkt["_score"] = info
+                        scored.append(mkt)
+                    if len(scored) >= slots * 3:
+                        break
+
+                scored.sort(key=lambda m: m["_score"]["score"], reverse=True)
+                log.info("Scored %d/%d candidates — top scores: %s",
+                         len(scored), len(check_pool),
+                         ", ".join(f"${m['_score']['score']:.0f}" for m in scored[:5]))
+
+                filled = 0
+                for mkt in scored:
+                    if filled >= slots:
+                        break
                     pos = place_buy(clob, mkt)
                     if pos:
                         positions.append(pos)
                         save_positions(positions)
                         bot_state["positions"] = positions
+                        filled += 1
                         time.sleep(1)
 
         except KeyboardInterrupt:
