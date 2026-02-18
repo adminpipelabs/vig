@@ -1,13 +1,11 @@
 """
-Vig - Polymarket Rolling Bet Bot
-==================================
-Strategy: Always hold up to MAX_BETS active positions.
-Each position: YES token on any market priced $0.60-$0.80 expiring within 60 mins.
-Claims resolved positions in the background and redeploys capital.
-Includes a live dashboard for monitoring and withdrawals.
-
-Setup:
-    pip install py-clob-client python-dotenv web3 requests flask
+Vig - Polymarket Swing Trading Bot
+====================================
+Strategy: Buy cheap outcomes, sell at 2x.
+- Scan high-volume markets for outcomes priced BUY_BELOW
+- Place BUY limit order
+- Place SELL limit order at SELL_AT target
+- Dashboard for monitoring + withdrawals
 
 Run:
     python bot.py
@@ -19,13 +17,13 @@ import time
 import logging
 import threading
 import requests
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from flask import Flask, request as flask_request, jsonify, Response
 
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs
-from py_clob_client.order_builder.constants import BUY
+from py_clob_client.clob_types import OrderArgs, OrderType
+from py_clob_client.order_builder.constants import BUY, SELL
 from py_clob_client.constants import POLYGON
 
 from web3 import Web3
@@ -47,11 +45,11 @@ PRIVATE_KEY     = os.getenv("PRIVATE_KEY")
 RPC_URL         = os.getenv("RPC_URL", "https://polygon-rpc.com")
 
 MAX_BETS        = int(os.getenv("MAX_BETS", "10"))
-BET_SIZE        = float(os.getenv("BET_SIZE", "10"))
-MIN_PRICE       = float(os.getenv("MIN_PRICE", "0.60"))
-MAX_PRICE       = float(os.getenv("MAX_PRICE", "0.80"))
-EXPIRY_WINDOW   = int(os.getenv("EXPIRY_WINDOW", "60"))
-POLL_SECONDS    = int(os.getenv("POLL_SECONDS", "60"))
+BET_SIZE        = float(os.getenv("BET_SIZE", "5"))
+BUY_BELOW       = float(os.getenv("BUY_BELOW", "0.25"))
+SELL_AT         = float(os.getenv("SELL_AT", "0.40"))
+MIN_VOLUME      = float(os.getenv("MIN_VOLUME", "10000"))
+POLL_SECONDS    = int(os.getenv("POLL_SECONDS", "120"))
 PORT            = int(os.getenv("PORT", "8080"))
 
 CLOB_HOST       = "https://clob.polymarket.com"
@@ -103,6 +101,7 @@ TRADES_FILE = "trades.json"
 w3_instance = None
 account_instance = None
 usdc_contract = None
+clob_client = None
 
 bot_state = {
     "running": False,
@@ -110,8 +109,8 @@ bot_state = {
     "last_tick": None,
     "wallet": None,
     "positions": [],
-    "total_bets": 0,
-    "total_claimed": 0,
+    "total_buys": 0,
+    "total_sells": 0,
     "total_spent": 0.0,
 }
 
@@ -206,9 +205,8 @@ def get_matic_balance() -> float:
 # ── Market Scanner ────────────────────────────────────────────────────────────
 
 def scan_markets(active_token_ids: set) -> list:
+    """Find high-volume markets with outcomes priced below BUY_BELOW."""
     qualifying = []
-    now = datetime.now(timezone.utc)
-    end_max = now + timedelta(minutes=EXPIRY_WINDOW)
 
     try:
         resp = requests.get(
@@ -216,10 +214,9 @@ def scan_markets(active_token_ids: set) -> list:
             params={
                 "closed": "false",
                 "limit": 100,
-                "order": "endDate",
-                "ascending": "true",
-                "end_date_min": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "end_date_max": end_max.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "order": "volume_num",
+                "ascending": "false",
+                "volume_num_min": str(MIN_VOLUME),
             },
             timeout=10,
         )
@@ -228,15 +225,6 @@ def scan_markets(active_token_ids: set) -> list:
 
         for market in markets:
             try:
-                end_str = market.get("endDateIso") or market.get("end_date_iso")
-                if not end_str:
-                    continue
-                end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
-                mins_to_expiry = (end_dt - now).total_seconds() / 60
-
-                if mins_to_expiry <= 0:
-                    continue
-
                 tokens = market.get("clobTokenIds")
                 outcome_prices = market.get("outcomePrices")
                 outcomes = market.get("outcomes")
@@ -251,96 +239,105 @@ def scan_markets(active_token_ids: set) -> list:
                 except (json.JSONDecodeError, TypeError):
                     continue
 
-                best_idx = None
-                best_price = 0.0
+                volume = float(market.get("volumeNum") or market.get("volume") or 0)
+
                 for i in range(min(len(token_list), len(price_list), len(outcome_list))):
                     p = float(price_list[i])
-                    if MIN_PRICE <= p <= MAX_PRICE and p > best_price:
-                        best_price = p
-                        best_idx = i
+                    tid = token_list[i]
 
-                if best_idx is None:
-                    continue
+                    if p > BUY_BELOW or p < 0.05:
+                        continue
+                    if tid in active_token_ids:
+                        continue
 
-                token_id = token_list[best_idx]
-                outcome_name = str(outcome_list[best_idx])
-                price = best_price
+                    question = market.get("question", "Unknown")
+                    outcome_name = str(outcome_list[i])
+                    label = f"{question} → {outcome_name}"
 
-                if token_id in active_token_ids:
-                    continue
-
-                question = market.get("question", "Unknown")
-                label = f"{question} → {outcome_name}"
-
-                qualifying.append({
-                    "market_id": market.get("id"),
-                    "question": label,
-                    "token_id": token_id,
-                    "condition_id": market.get("conditionId"),
-                    "price": price,
-                    "mins_to_expiry": round(mins_to_expiry, 1),
-                    "end_date": end_str,
-                })
+                    qualifying.append({
+                        "market_id": market.get("id"),
+                        "question": label,
+                        "token_id": tid,
+                        "condition_id": market.get("conditionId"),
+                        "price": p,
+                        "volume": volume,
+                        "tick_size": market.get("orderPriceMinTickSize", 0.01),
+                        "neg_risk": bool(market.get("negRisk")),
+                    })
 
             except Exception as e:
                 log.debug("Skipped market: %s", e)
                 continue
 
-        log.info("Scan complete — %d qualifying markets found", len(qualifying))
+        log.info("Scan — %d candidates (from %d markets)", len(qualifying), len(markets))
 
     except Exception as e:
         log.error("Scan failed: %s", e)
 
-    qualifying.sort(key=lambda m: m["price"], reverse=True)
+    qualifying.sort(key=lambda m: m["volume"], reverse=True)
     return qualifying
 
 
-# ── Bet Placement ─────────────────────────────────────────────────────────────
+# ── Order Placement ───────────────────────────────────────────────────────────
 
-def place_bet(client: ClobClient, market: dict) -> dict | None:
+def place_buy(client: ClobClient, market: dict) -> dict | None:
+    """Place a BUY limit order at the market's current price."""
     token_id = market["token_id"]
     price = market["price"]
+    tick = float(market.get("tick_size", 0.01))
+    neg_risk = market.get("neg_risk", False)
+
+    size = round(BET_SIZE / price, 2)
+    cost = round(price * size, 2)
 
     log.info(
-        "Placing bet: %s | price=%.2f | expiry=%.0fmin",
-        market["question"][:60],
-        price,
-        market["mins_to_expiry"],
+        "BUY: %s | %.0f shares @ $%.2f = $%.2f",
+        market["question"][:55],
+        size, price, cost,
     )
 
     try:
-        args = OrderArgs(
+        buy_args = OrderArgs(
             token_id=token_id,
             price=round(price, 4),
-            size=BET_SIZE,
+            size=size,
             side=BUY,
         )
-        result = client.create_and_post_order(args)
-        order_id = result.get("orderID", "?")
-        log.info("Bet placed. Order ID: %s", order_id)
+        opts = {"tick_size": str(tick), "neg_risk": neg_risk}
+        signed = client.create_order(buy_args, options=opts)
+        result = client.post_order(signed, OrderType.GTC)
 
-        cost = round(price * BET_SIZE, 2)
+        if not result.get("success", True) and result.get("errorMsg"):
+            log.warning("Buy rejected: %s", result["errorMsg"])
+            return None
+
+        order_id = result.get("orderID", "?")
+        log.info("Buy order live. ID: %s", order_id)
+
         position = {
-            "order_id": order_id,
+            "buy_order_id": order_id,
+            "sell_order_id": None,
             "market_id": market["market_id"],
             "question": market["question"],
             "token_id": token_id,
             "condition_id": market["condition_id"],
-            "price": price,
-            "size": BET_SIZE,
+            "buy_price": price,
+            "sell_target": SELL_AT,
+            "size": size,
             "cost": cost,
-            "end_date": market["end_date"],
+            "tick_size": tick,
+            "neg_risk": neg_risk,
+            "status": "buying",
             "placed_at": datetime.now(timezone.utc).isoformat(),
-            "claimed": False,
         }
 
-        bot_state["total_bets"] += 1
+        bot_state["total_buys"] += 1
         bot_state["total_spent"] += cost
         add_trade({
-            "type": "BET",
+            "type": "BUY",
             "question": market["question"][:80],
             "price": price,
-            "size": BET_SIZE,
+            "size": size,
             "cost": cost,
             "time": datetime.now(timezone.utc).isoformat(),
         })
@@ -348,8 +345,69 @@ def place_bet(client: ClobClient, market: dict) -> dict | None:
         return position
 
     except Exception as e:
-        log.error("Failed to place bet: %s", e)
+        log.error("Buy failed: %s", e)
         return None
+
+
+def place_sell(client: ClobClient, position: dict) -> bool:
+    """Place a SELL limit order at SELL_AT target price."""
+    token_id = position["token_id"]
+    size = position["size"]
+    tick = float(position.get("tick_size", 0.01))
+    neg_risk = position.get("neg_risk", False)
+
+    log.info(
+        "SELL: %s | %.0f shares @ $%.2f",
+        position["question"][:55],
+        size, SELL_AT,
+    )
+
+    try:
+        sell_args = OrderArgs(
+            token_id=token_id,
+            price=round(SELL_AT, 4),
+            size=size,
+            side=SELL,
+        )
+        opts = {"tick_size": str(tick), "neg_risk": neg_risk}
+        signed = client.create_order(sell_args, options=opts)
+        result = client.post_order(signed, OrderType.GTC)
+
+        if not result.get("success", True) and result.get("errorMsg"):
+            log.warning("Sell rejected: %s", result["errorMsg"])
+            return False
+
+        sell_id = result.get("orderID", "?")
+        position["sell_order_id"] = sell_id
+        position["status"] = "selling"
+        log.info("Sell order live. ID: %s", sell_id)
+
+        bot_state["total_sells"] += 1
+        add_trade({
+            "type": "SELL",
+            "question": position["question"][:80],
+            "price": SELL_AT,
+            "size": size,
+            "time": datetime.now(timezone.utc).isoformat(),
+        })
+
+        return True
+
+    except Exception as e:
+        log.error("Sell failed: %s", e)
+        return False
+
+
+def check_order_filled(client: ClobClient, order_id: str) -> bool:
+    """Check if an order has been fully filled."""
+    try:
+        order = client.get_order(order_id)
+        if order:
+            status = order.get("status", "")
+            return status in ("MATCHED", "FILLED")
+    except Exception:
+        pass
+    return False
 
 
 # ── Claim / Settlement ────────────────────────────────────────────────────────
@@ -371,12 +429,10 @@ def check_market_resolved(position: dict) -> bool:
 def try_claim(w3: Web3, account, ctf, position: dict) -> bool:
     condition_id = position.get("condition_id")
     if not condition_id:
-        log.warning("No condition_id for position %s — cannot claim", position.get("order_id"))
         return False
 
     try:
         log.info("Claiming: %s", position["question"][:60])
-
         tx = ctf.functions.redeemPositions(
             Web3.to_checksum_address(USDC_ADDRESS),
             b"\x00" * 32,
@@ -394,8 +450,7 @@ def try_claim(w3: Web3, account, ctf, position: dict) -> bool:
         receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
 
         if receipt.status == 1:
-            log.info("Claim successful. TX: %s", tx_hash.hex())
-            bot_state["total_claimed"] += 1
+            log.info("Claim OK. TX: %s", tx_hash.hex())
             add_trade({
                 "type": "CLAIM",
                 "question": position["question"][:80],
@@ -403,25 +458,17 @@ def try_claim(w3: Web3, account, ctf, position: dict) -> bool:
                 "time": datetime.now(timezone.utc).isoformat(),
             })
             return True
-        else:
-            log.warning("Claim tx reverted. TX: %s", tx_hash.hex())
-            return False
-
     except Exception as e:
-        err = str(e)
-        if "revert" in err.lower():
-            log.debug("Market not yet redeemable: %s", position["question"][:40])
-        else:
+        if "revert" not in str(e).lower():
             log.error("Claim error: %s", e)
-        return False
+    return False
 
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
 
 flask_app = Flask(__name__)
 flask_app.logger.setLevel(logging.WARNING)
-werkzeug_log = logging.getLogger("werkzeug")
-werkzeug_log.setLevel(logging.WARNING)
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -432,42 +479,42 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:#0a0a0f;color:#e0e0e0;min-height:100vh;padding:20px}
-.c{max-width:820px;margin:0 auto}
+.c{max-width:860px;margin:0 auto}
 h1{font-size:1.5rem;color:#fff;margin-bottom:4px;display:flex;align-items:center;gap:8px}
 .sub{color:#666;font-size:0.82rem;margin-bottom:24px}
 .wallet{font-family:monospace;font-size:0.75rem;color:#555;margin-bottom:20px;word-break:break-all}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:24px}
+.strat{background:#0f1a2e;border:1px solid #1e2e50;border-radius:8px;padding:10px 14px;margin-bottom:20px;font-size:0.8rem;color:#7aa2d6}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:24px}
 .card{background:#141420;border:1px solid #1e1e30;border-radius:12px;padding:16px}
 .card .l{font-size:0.7rem;color:#888;text-transform:uppercase;letter-spacing:.5px}
-.card .v{font-size:1.6rem;font-weight:700;margin-top:4px;color:#fff}
-.card .v.g{color:#22c55e}
-.card .v.r{color:#ef4444}
-.card .v.b{color:#3b82f6}
+.card .v{font-size:1.5rem;font-weight:700;margin-top:4px;color:#fff}
+.card .v.g{color:#22c55e}.card .v.r{color:#ef4444}.card .v.b{color:#3b82f6}.card .v.y{color:#f59e0b}
 .sec{background:#141420;border:1px solid #1e1e30;border-radius:12px;padding:16px;margin-bottom:16px}
 .sec h2{font-size:0.85rem;color:#aaa;margin-bottom:12px;text-transform:uppercase;letter-spacing:.5px}
 table{width:100%;border-collapse:collapse}
 th{text-align:left;font-size:0.68rem;color:#555;text-transform:uppercase;padding:6px 8px;border-bottom:1px solid #1e1e30}
 td{padding:8px;font-size:0.82rem;border-bottom:1px solid #0e0e18}
 .badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:0.68rem;font-weight:600}
-.badge.bet{background:#1e3a5f;color:#60a5fa}
+.badge.buy{background:#1e3a5f;color:#60a5fa}
+.badge.sell{background:#3f2a1a;color:#f59e0b}
 .badge.claim{background:#1a3f2a;color:#22c55e}
-.badge.withdraw{background:#3f2a1a;color:#f59e0b}
+.badge.withdraw{background:#2a1a3f;color:#c084fc}
+.st{font-size:0.72rem;padding:2px 6px;border-radius:3px}
+.st.buying{background:#1e3a5f;color:#60a5fa}
+.st.selling{background:#3f2a1a;color:#f59e0b}
+.st.done{background:#1a3f2a;color:#22c55e}
 .wf{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 input,button{font-family:inherit;font-size:0.85rem;padding:8px 12px;border-radius:8px;border:1px solid #1e1e30;background:#0a0a0f;color:#e0e0e0}
-input{flex:1;min-width:120px}
-input:focus{outline:none;border-color:#3b82f6}
+input{flex:1;min-width:120px}input:focus{outline:none;border-color:#3b82f6}
 button{background:#3b82f6;border:none;color:white;font-weight:600;cursor:pointer;white-space:nowrap}
-button:hover{background:#2563eb}
-button:disabled{opacity:.5;cursor:not-allowed}
+button:hover{background:#2563eb}button:disabled{opacity:.5;cursor:not-allowed}
 .dot{display:inline-block;width:10px;height:10px;border-radius:50%}
-.dot.on{background:#22c55e;box-shadow:0 0 6px #22c55e}
-.dot.off{background:#ef4444}
+.dot.on{background:#22c55e;box-shadow:0 0 6px #22c55e}.dot.off{background:#ef4444}
 .msg{margin-top:8px;font-size:0.8rem;padding:8px;border-radius:6px}
-.msg.ok{background:#1a3f2a;color:#22c55e}
-.msg.err{background:#3f1a1a;color:#ef4444}
+.msg.ok{background:#1a3f2a;color:#22c55e}.msg.err{background:#3f1a1a;color:#ef4444}
 .empty{color:#444;font-style:italic;padding:12px 0;font-size:0.85rem}
-.trunc{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-@media(max-width:600px){.cards{grid-template-columns:1fr 1fr}.trunc{max-width:140px}}
+.trunc{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media(max-width:600px){.cards{grid-template-columns:1fr 1fr}.trunc{max-width:130px}}
 </style>
 </head>
 <body>
@@ -475,13 +522,14 @@ button:disabled{opacity:.5;cursor:not-allowed}
   <h1><span class="dot" id="dot"></span> Vig</h1>
   <div class="sub" id="sub">Connecting...</div>
   <div class="wallet" id="wallet"></div>
+  <div class="strat" id="strat"></div>
 
   <div class="cards">
     <div class="card"><div class="l">USDC Balance</div><div class="v g" id="bal">--</div></div>
-    <div class="card"><div class="l">Active Bets</div><div class="v b" id="active">--</div></div>
-    <div class="card"><div class="l">Total Bets</div><div class="v" id="tbets">--</div></div>
-    <div class="card"><div class="l">Claimed</div><div class="v g" id="tclaim">--</div></div>
-    <div class="card"><div class="l">Total Spent</div><div class="v" id="tspent">--</div></div>
+    <div class="card"><div class="l">Active</div><div class="v b" id="active">--</div></div>
+    <div class="card"><div class="l">Buys</div><div class="v" id="tbuys">--</div></div>
+    <div class="card"><div class="l">Sells</div><div class="v y" id="tsells">--</div></div>
+    <div class="card"><div class="l">Spent</div><div class="v" id="tspent">--</div></div>
     <div class="card"><div class="l">Gas (POL)</div><div class="v" id="gas">--</div></div>
   </div>
 
@@ -515,24 +563,26 @@ async function refresh(){
     document.getElementById('dot').className='dot '+(d.running?'on':'off');
     const tick=d.last_tick?new Date(d.last_tick).toLocaleTimeString():'--';
     document.getElementById('sub').textContent=d.running
-      ?'Running · Last tick '+tick+' · Poll '+d.config.poll_seconds+'s'
-      :'Offline';
+      ?'Running · Last tick '+tick+' · Poll '+d.config.poll_seconds+'s':'Offline';
     document.getElementById('wallet').textContent=d.wallet||'';
+    document.getElementById('strat').textContent=
+      'Strategy: Buy below $'+d.config.buy_below.toFixed(2)+' → Sell at $'+d.config.sell_at.toFixed(2)+
+      ' · $'+d.config.bet_size+'/bet · Min volume $'+d.config.min_volume.toLocaleString();
+
     document.getElementById('bal').textContent='$'+d.usdc_balance.toFixed(2);
     document.getElementById('active').textContent=d.active_positions+'/'+d.max_bets;
-    document.getElementById('tbets').textContent=d.total_bets;
-    document.getElementById('tclaim').textContent=d.total_claimed;
+    document.getElementById('tbuys').textContent=d.total_buys;
+    document.getElementById('tsells').textContent=d.total_sells;
     document.getElementById('tspent').textContent='$'+d.total_spent.toFixed(2);
     document.getElementById('gas').textContent=d.gas_balance.toFixed(4);
 
     const pe=document.getElementById('pos');
     if(!d.positions.length){pe.innerHTML='<div class="empty">No active positions</div>'}
     else{
-      let h='<table><tr><th>Market</th><th>Price</th><th>Cost</th><th>Expires</th></tr>';
+      let h='<table><tr><th>Market</th><th>Buy</th><th>Target</th><th>Status</th></tr>';
       d.positions.forEach(p=>{
-        const exp=new Date(p.end_date).toLocaleTimeString();
-        const cost=p.cost?'$'+p.cost.toFixed(2):'--';
-        h+=`<tr><td class="trunc">${p.question}</td><td>$${p.price.toFixed(2)}</td><td>${cost}</td><td>${exp}</td></tr>`;
+        const st=p.status||'buying';
+        h+=`<tr><td class="trunc">${p.question}</td><td>$${(p.buy_price||0).toFixed(2)}</td><td>$${(p.sell_target||0).toFixed(2)}</td><td><span class="st ${st}">${st}</span></td></tr>`;
       });
       pe.innerHTML=h+'</table>';
     }
@@ -543,9 +593,9 @@ async function refresh(){
       let h='<table><tr><th>Type</th><th>Market</th><th>Details</th><th>Time</th></tr>';
       d.trades.slice().reverse().forEach(t=>{
         const cls=t.type.toLowerCase();
-        const det=t.type==='BET'?'$'+(t.cost||0).toFixed(2)+' @ '+(t.price||0).toFixed(2)
-                  :t.type==='CLAIM'?'Redeemed'
-                  :t.type==='WITHDRAW'?'Sent':'--';
+        const det=t.type==='BUY'?'$'+(t.cost||0).toFixed(2)+' @ $'+(t.price||0).toFixed(2)
+                  :t.type==='SELL'?(t.size||0).toFixed(0)+' shares @ $'+(t.price||0).toFixed(2)
+                  :t.type==='CLAIM'?'Redeemed':'Sent';
         const tm=new Date(t.time).toLocaleTimeString();
         h+=`<tr><td><span class="badge ${cls}">${t.type}</span></td><td class="trunc">${t.question||''}</td><td>${det}</td><td>${tm}</td></tr>`;
       });
@@ -569,8 +619,7 @@ async function doWithdraw(){
     const d=await r.json();
     if(d.success){
       msg.innerHTML=`<div class="msg ok">Sent! TX: ${d.tx_hash.slice(0,20)}...</div>`;
-      document.getElementById('wAmt').value='';
-      setTimeout(refresh,3000);
+      document.getElementById('wAmt').value='';setTimeout(refresh,3000);
     }else{msg.innerHTML=`<div class="msg err">${d.error}</div>`}
   }catch(e){msg.innerHTML='<div class="msg err">Request failed</div>'}
   btn.disabled=false;btn.textContent='Send';
@@ -600,15 +649,15 @@ def api_status():
         "active_positions": len(bot_state["positions"]),
         "max_bets": MAX_BETS,
         "positions": bot_state["positions"],
-        "total_bets": bot_state["total_bets"],
-        "total_claimed": bot_state["total_claimed"],
+        "total_buys": bot_state["total_buys"],
+        "total_sells": bot_state["total_sells"],
         "total_spent": bot_state["total_spent"],
         "trades": trade_history[-30:],
         "config": {
             "bet_size": BET_SIZE,
-            "min_price": MIN_PRICE,
-            "max_price": MAX_PRICE,
-            "expiry_window": EXPIRY_WINDOW,
+            "buy_below": BUY_BELOW,
+            "sell_at": SELL_AT,
+            "min_volume": MIN_VOLUME,
             "poll_seconds": POLL_SECONDS,
         },
     })
@@ -670,14 +719,17 @@ def run():
     if not PRIVATE_KEY:
         raise ValueError("PRIVATE_KEY not set in .env")
 
-    log.info("Starting Vig rolling bet bot")
-    log.info("Max bets     : %d", MAX_BETS)
-    log.info("Bet size     : $%.0f USDC", BET_SIZE)
-    log.info("Price range  : $%.2f - $%.2f", MIN_PRICE, MAX_PRICE)
-    log.info("Expiry window: %d mins", EXPIRY_WINDOW)
+    global clob_client
+    log.info("Starting Vig swing bot")
+    log.info("Buy below    : $%.2f", BUY_BELOW)
+    log.info("Sell at      : $%.2f", SELL_AT)
+    log.info("Bet size     : $%.0f", BET_SIZE)
+    log.info("Max positions: %d", MAX_BETS)
+    log.info("Min volume   : $%.0f", MIN_VOLUME)
     log.info("Poll interval: %ds", POLL_SECONDS)
 
     clob = build_clob_client()
+    clob_client = clob
     w3, account, ctf = build_web3()
 
     global trade_history
@@ -695,42 +747,63 @@ def run():
         try:
             bot_state["last_tick"] = datetime.now(timezone.utc).isoformat()
             log.info("── Tick ──────────────────────────────────────────")
-            log.info("Active positions: %d / %d", len(positions), MAX_BETS)
+            log.info("Positions: %d / %d", len(positions), MAX_BETS)
 
-            for pos in [p for p in positions if not p.get("claimed")]:
-                if check_market_resolved(pos):
-                    success = try_claim(w3, account, ctf, pos)
-                    if success:
-                        pos["claimed"] = True
-                        pos["claimed_at"] = datetime.now(timezone.utc).isoformat()
+            # 1. Check buy orders — if filled, place sell
+            for pos in positions:
+                if pos["status"] == "buying":
+                    if check_order_filled(clob, pos["buy_order_id"]):
+                        log.info("Buy filled: %s", pos["question"][:50])
+                        pos["status"] = "bought"
+                        place_sell(clob, pos)
+                        save_positions(positions)
 
-            positions = [p for p in positions if not p.get("claimed")]
+                elif pos["status"] == "selling":
+                    if check_order_filled(clob, pos["sell_order_id"]):
+                        log.info("Sell filled: %s", pos["question"][:50])
+                        pos["status"] = "done"
+                        add_trade({
+                            "type": "SELL",
+                            "question": pos["question"][:80],
+                            "price": SELL_AT,
+                            "size": pos["size"],
+                            "time": datetime.now(timezone.utc).isoformat(),
+                        })
+
+            # 2. Check resolved markets — claim on-chain
+            for pos in positions:
+                if pos["status"] in ("buying", "bought", "selling"):
+                    if check_market_resolved(pos):
+                        try_claim(w3, account, ctf, pos)
+                        pos["status"] = "done"
+
+            # 3. Remove done positions
+            positions = [p for p in positions if p["status"] != "done"]
             save_positions(positions)
             bot_state["positions"] = positions
 
-            slots_available = MAX_BETS - len(positions)
-            log.info("Slots available: %d", slots_available)
+            # 4. Fill empty slots with new buys
+            slots = MAX_BETS - len(positions)
+            log.info("Open slots: %d", slots)
 
-            if slots_available > 0:
-                active_token_ids = {p["token_id"] for p in positions}
-                candidates = scan_markets(active_token_ids)
+            if slots > 0:
+                active_ids = {p["token_id"] for p in positions}
+                candidates = scan_markets(active_ids)
 
-                for market in candidates[:slots_available]:
-                    position = place_bet(clob, market)
-                    if position:
-                        positions.append(position)
+                for mkt in candidates[:slots]:
+                    pos = place_buy(clob, mkt)
+                    if pos:
+                        positions.append(pos)
                         save_positions(positions)
                         bot_state["positions"] = positions
                         time.sleep(1)
-            else:
-                log.info("Portfolio full — skipping scan")
 
         except KeyboardInterrupt:
             log.info("Shutting down.")
             save_positions(positions)
             break
         except Exception as e:
-            log.error("Unexpected error in main loop: %s", e)
+            log.error("Main loop error: %s", e)
 
         time.sleep(POLL_SECONDS)
 
