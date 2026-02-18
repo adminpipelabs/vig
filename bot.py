@@ -268,7 +268,7 @@ def get_matic_balance() -> float:
 # ── Market Scanner ────────────────────────────────────────────────────────────
 
 def _parse_market_candidates(markets: list, active_token_ids: set) -> list:
-    """Extract qualifying outcomes from a list of market dicts."""
+    """Extract ALL outcomes — let the order book scoring decide what's tradeable."""
     found = []
     for market in markets:
         try:
@@ -292,8 +292,6 @@ def _parse_market_candidates(markets: list, active_token_ids: set) -> list:
                 p = float(price_list[i])
                 tid = token_list[i]
 
-                if p > BUY_BELOW or p < 0.01:
-                    continue
                 if tid in active_token_ids:
                     continue
 
@@ -384,11 +382,16 @@ def scan_markets(active_token_ids: set) -> list:
 # ── Order Placement ───────────────────────────────────────────────────────────
 
 STALE_ORDER_MINUTES = int(os.getenv("STALE_MINUTES", "30"))
-MIN_BOOK_USD = float(os.getenv("MIN_BOOK_USD", "50"))
+MIN_BOOK_USD = float(os.getenv("MIN_BOOK_USD", "30"))
 
 
 def score_market(token_id: str, client: ClobClient, label: str = "") -> dict | None:
-    """Score by real $ liquidity near the current price, within our buy range."""
+    """
+    New strategy: find markets with REAL recent activity, then WE set the price.
+    - Use last_trade_price to confirm the market is alive
+    - Measure bid depth we'd sell into
+    - We'll place limit buys — don't need cheap asks
+    """
     tag = label[:30] if label else token_id[:12]
     try:
         book = client.get_order_book(token_id)
@@ -404,48 +407,43 @@ def score_market(token_id: str, client: ClobClient, label: str = "") -> dict | N
             save_blacklist(blacklisted_tokens)
             return None
 
-        if best_ask > BUY_BELOW:
+        if ltp < 0.05 or ltp > 0.50:
             return None
 
-        if best_bid < 0.01:
-            blacklisted_tokens.add(token_id)
-            save_blacklist(blacklisted_tokens)
+        if best_bid < 0.03:
             return None
 
-        mid = (best_bid + best_ask) / 2
-        band_lo = max(mid - 0.10, 0.01)
-        band_hi = min(mid + 0.10, 0.99)
-
-        bid_usd = sum(
+        exit_bids_usd = sum(
             float(b.price) * float(b.size)
-            for b in bids if band_lo <= float(b.price) <= band_hi
-        )
-        ask_usd = sum(
-            float(a.price) * float(a.size)
-            for a in asks if band_lo <= float(a.price) <= band_hi
+            for b in bids if float(b.price) >= SELL_AT * 0.7
         )
 
-        if bid_usd < MIN_BOOK_USD:
-            log.info("REJECT %s: bid$%.0f<$%.0f near $%.2f (bid=$%.2f ask=$%.2f)",
-                     tag, bid_usd, MIN_BOOK_USD, mid, best_bid, best_ask)
+        all_bid_usd = sum(float(b.price) * float(b.size) for b in bids[:10])
+
+        if all_bid_usd < MIN_BOOK_USD:
             return None
 
-        if ask_usd < MIN_BOOK_USD:
-            log.info("REJECT %s: ask$%.0f<$%.0f near $%.2f (bid=$%.2f ask=$%.2f)",
-                     tag, ask_usd, MIN_BOOK_USD, mid, best_bid, best_ask)
-            return None
+        our_buy_price = min(best_bid, BUY_BELOW)
+        potential_profit = (SELL_AT - our_buy_price) / our_buy_price if our_buy_price > 0 else 0
 
         spread = (best_ask - best_bid) / best_ask if best_ask > 0 else 1
 
-        score = min(bid_usd, ask_usd) * (bid_usd + ask_usd) * (1 - spread)
+        score = (
+            all_bid_usd
+            * (1 + exit_bids_usd)
+            * (1 + potential_profit)
+            * (1 - min(spread, 0.9))
+            * (1 + min(ltp, 0.5))
+        )
 
         return {
             "best_bid": best_bid,
             "best_ask": best_ask,
-            "bid_usd": bid_usd,
-            "ask_usd": ask_usd,
+            "all_bid_usd": all_bid_usd,
+            "exit_bids_usd": exit_bids_usd,
             "spread": spread,
             "last_trade": ltp,
+            "our_buy_price": our_buy_price,
             "score": score,
         }
     except Exception as e:
@@ -454,7 +452,7 @@ def score_market(token_id: str, client: ClobClient, label: str = "") -> dict | N
 
 
 def place_buy(client: ClobClient, market: dict) -> dict | None:
-    """Place a BUY order — uses pre-scored data, enters at smart price."""
+    """Place a GTC limit buy at OUR price — we're the bid, waiting for sellers."""
     token_id = market["token_id"]
     tick = float(market.get("tick_size", 0.01))
     neg_risk = market.get("neg_risk", False)
@@ -463,56 +461,43 @@ def place_buy(client: ClobClient, market: dict) -> dict | None:
     if not info:
         info = score_market(token_id, client, market["question"])
         if not info:
-            log.info("SKIP: %s — failed quality checks", market["question"][:45])
             return None
 
     best_bid = info["best_bid"]
     best_ask = info["best_ask"]
+    ltp = info["last_trade"]
 
-    if best_ask > BUY_BELOW:
-        log.info("SKIP: %s — ask $%.3f > limit $%.2f",
-                 market["question"][:40], best_ask, BUY_BELOW)
+    price = min(best_bid + tick, BUY_BELOW)
+    price = round(price, 2)
+
+    if price < 0.02:
         return None
 
-    entry = round(best_bid + tick, 4)
-    if entry >= best_ask and best_ask > 0:
-        entry = best_ask
-    if entry > BUY_BELOW:
-        entry = BUY_BELOW
-
-    price = entry
     size = round(BET_SIZE / price, 2)
     cost = round(price * size, 2)
 
     log.info(
-        "BUY: %s | %.0f @ $%.3f=$%.2f bid=$%.3f ask=$%.3f bid$$%.0f ask$$%.0f",
+        "BID: %s | %.0f @ $%.2f=$%.2f (ltp=$%.2f bid=$%.2f ask=$%.2f depth=$%.0f)",
         market["question"][:30],
-        size, price, cost, best_bid, best_ask,
-        info["bid_usd"], info["ask_usd"],
+        size, price, cost, ltp, best_bid, best_ask, info["all_bid_usd"],
     )
 
     try:
         buy_args = OrderArgs(
             token_id=token_id,
-            price=round(price, 4),
+            price=price,
             size=size,
             side=BUY,
         )
         opts = CreateOrderOptions(tick_size=str(tick), neg_risk=neg_risk)
 
         signed = client.create_order(buy_args, options=opts)
-        result = client.post_order(signed, OrderType.FOK)
+        result = client.post_order(signed, OrderType.GTC)
 
         order_id = result.get("orderID", "")
-        filled = result.get("status") == "MATCHED" or result.get("status") == "FILLED"
+        filled = result.get("status") in ("MATCHED", "FILLED")
 
         if not order_id:
-            signed2 = client.create_order(buy_args, options=opts)
-            result = client.post_order(signed2, OrderType.GTC)
-            order_id = result.get("orderID", "?")
-            filled = False
-
-        if not order_id or order_id == "?":
             if result.get("errorMsg"):
                 log.warning("Buy rejected: %s", result["errorMsg"])
             return None
@@ -1281,9 +1266,8 @@ def run():
                 active_ids = {p["token_id"] for p in positions}
                 candidates = scan_markets(active_ids)
 
-                check_pool = candidates[:200]
-                random.shuffle(check_pool)
-                check_pool = check_pool[:60]
+                pool_size = min(len(candidates), 3000)
+                check_pool = random.sample(candidates[:pool_size], min(80, pool_size))
 
                 scored = []
                 for mkt in check_pool:
@@ -1298,7 +1282,7 @@ def run():
                 log.info("Scored %d/%d — top: %s",
                          len(scored), len(check_pool),
                          " | ".join(
-                             f"bid${m['_score']['bid_usd']:.0f}/ask${m['_score']['ask_usd']:.0f}"
+                             f"ltp=${m['_score']['last_trade']:.2f} depth=${m['_score']['all_bid_usd']:.0f}"
                              for m in scored[:5]
                          ))
 
