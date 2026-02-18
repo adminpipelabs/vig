@@ -384,13 +384,11 @@ def scan_markets(active_token_ids: set) -> list:
 # ── Order Placement ───────────────────────────────────────────────────────────
 
 STALE_ORDER_MINUTES = int(os.getenv("STALE_MINUTES", "30"))
-MIN_BOOK_USD = float(os.getenv("MIN_BOOK_USD", "100"))
-RANGE_LO = 0.05
-RANGE_HI = 0.50
+MIN_BOOK_USD = float(os.getenv("MIN_BOOK_USD", "50"))
 
 
 def score_market(token_id: str, client: ClobClient, label: str = "") -> dict | None:
-    """Score by real $ liquidity on bid + ask side within our trading range."""
+    """Score by real $ liquidity near the current price, within our buy range."""
     tag = label[:30] if label else token_id[:12]
     try:
         book = client.get_order_book(token_id)
@@ -406,35 +404,47 @@ def score_market(token_id: str, client: ClobClient, label: str = "") -> dict | N
             save_blacklist(blacklisted_tokens)
             return None
 
-        bid_usd = 0.0
-        for b in bids:
-            p = float(b.price)
-            if RANGE_LO <= p <= RANGE_HI:
-                bid_usd += p * float(b.size)
+        if best_ask > BUY_BELOW:
+            return None
 
-        ask_usd = 0.0
-        for a in asks:
-            p = float(a.price)
-            if RANGE_LO <= p <= BUY_BELOW:
-                ask_usd += p * float(a.size)
+        if best_bid < 0.01:
+            blacklisted_tokens.add(token_id)
+            save_blacklist(blacklisted_tokens)
+            return None
+
+        mid = (best_bid + best_ask) / 2
+        band_lo = max(mid - 0.10, 0.01)
+        band_hi = min(mid + 0.10, 0.99)
+
+        bid_usd = sum(
+            float(b.price) * float(b.size)
+            for b in bids if band_lo <= float(b.price) <= band_hi
+        )
+        ask_usd = sum(
+            float(a.price) * float(a.size)
+            for a in asks if band_lo <= float(a.price) <= band_hi
+        )
 
         if bid_usd < MIN_BOOK_USD:
-            log.info("REJECT %s: bid$$%.0f < $%.0f in range (best_bid=$%.2f)",
-                     tag, bid_usd, MIN_BOOK_USD, best_bid)
+            log.info("REJECT %s: bid$%.0f<$%.0f near $%.2f (bid=$%.2f ask=$%.2f)",
+                     tag, bid_usd, MIN_BOOK_USD, mid, best_bid, best_ask)
             return None
 
         if ask_usd < MIN_BOOK_USD:
-            log.info("REJECT %s: ask$$%.0f < $%.0f in range (best_ask=$%.2f)",
-                     tag, ask_usd, MIN_BOOK_USD, best_ask)
+            log.info("REJECT %s: ask$%.0f<$%.0f near $%.2f (bid=$%.2f ask=$%.2f)",
+                     tag, ask_usd, MIN_BOOK_USD, mid, best_bid, best_ask)
             return None
 
-        score = min(bid_usd, ask_usd) * (bid_usd + ask_usd)
+        spread = (best_ask - best_bid) / best_ask if best_ask > 0 else 1
+
+        score = min(bid_usd, ask_usd) * (bid_usd + ask_usd) * (1 - spread)
 
         return {
             "best_bid": best_bid,
             "best_ask": best_ask,
             "bid_usd": bid_usd,
             "ask_usd": ask_usd,
+            "spread": spread,
             "last_trade": ltp,
             "score": score,
         }
