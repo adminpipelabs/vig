@@ -480,15 +480,19 @@ def place_sell(client: ClobClient, position: dict) -> bool:
 
 
 def get_current_price(token_id: str) -> float | None:
-    """Fetch the current mid-price for a token from the CLOB."""
+    """Fetch the last trade price or mid-price for a token from the CLOB."""
     try:
         if clob_client:
             book = clob_client.get_order_book(token_id)
             if book:
-                bids = book.get("bids", [])
-                asks = book.get("asks", [])
-                best_bid = float(bids[0]["price"]) if bids else 0
-                best_ask = float(asks[0]["price"]) if asks else 0
+                ltp = getattr(book, "last_trade_price", None)
+                if ltp and float(ltp) > 0:
+                    return round(float(ltp), 4)
+
+                bids = getattr(book, "bids", [])
+                asks = getattr(book, "asks", [])
+                best_bid = float(bids[0].price) if bids else 0
+                best_ask = float(asks[0].price) if asks else 0
                 if best_bid and best_ask:
                     return round((best_bid + best_ask) / 2, 4)
                 return best_bid or best_ask or None
@@ -914,34 +918,69 @@ def api_close():
         return jsonify({"success": False, "error": "Position not found"})
 
     try:
-        cancelled = []
-        if pos.get("buy_order_id") and pos["status"] == "buying":
+        actions = []
+
+        if pos["status"] == "buying":
             cancel_order(clob_client, pos["buy_order_id"])
-            cancelled.append("buy order")
+            actions.append("cancelled buy order")
+            current = get_current_price(token_id) or 0
+            close_position(pos, "manual", 0)
 
-        if pos.get("sell_order_id") and pos["status"] == "selling":
-            cancel_order(clob_client, pos["sell_order_id"])
-            cancelled.append("sell order")
+        elif pos["status"] in ("selling", "bought"):
+            if pos.get("sell_order_id"):
+                cancel_order(clob_client, pos["sell_order_id"])
+                actions.append("cancelled sell order")
 
-        current = get_current_price(token_id) or pos.get("buy_price", 0)
-        close_position(pos, "manual", current)
+            current = get_current_price(token_id) or pos.get("buy_price", 0)
+            size = pos["size"]
+            tick = float(pos.get("tick_size", 0.01))
+            neg_risk = pos.get("neg_risk", False)
+
+            book = clob_client.get_order_book(token_id)
+            bids = getattr(book, "bids", [])
+            sell_price = float(bids[0].price) if bids else round(current * 0.95, 4)
+            sell_price = max(sell_price, 0.001)
+
+            sell_args = OrderArgs(
+                token_id=token_id,
+                price=round(sell_price, 4),
+                size=size,
+                side=SELL,
+            )
+            opts = CreateOrderOptions(tick_size=str(tick), neg_risk=neg_risk)
+            signed = clob_client.create_order(sell_args, options=opts)
+            result = clob_client.post_order(signed, OrderType.FOK)
+
+            if result.get("orderID"):
+                actions.append(f"sold {size:.0f} shares @ ${sell_price:.3f}")
+                close_position(pos, "manual", sell_price)
+            else:
+                signed2 = clob_client.create_order(sell_args, options=opts)
+                result2 = clob_client.post_order(signed2, OrderType.GTC)
+                actions.append(f"sell order placed @ ${sell_price:.3f}")
+                close_position(pos, "manual", sell_price)
+
+        else:
+            close_position(pos, "manual", 0)
+
         pos["status"] = "done"
 
         add_trade({
             "type": "CLOSE",
             "question": pos["question"][:80],
-            "price": current,
+            "price": current if pos["status"] == "buying" else sell_price if 'sell_price' in dir() else 0,
             "time": datetime.now(timezone.utc).isoformat(),
         })
 
         bot_state["positions"] = [p for p in bot_state["positions"] if p["status"] != "done"]
         save_positions(bot_state["positions"])
 
-        msg = f"Cancelled {', '.join(cancelled)}" if cancelled else "Position closed"
-        log.info("Manual close: %s", pos["question"][:50])
+        msg = "; ".join(actions) if actions else "Position closed"
+        log.info("Manual close: %s — %s", pos["question"][:50], msg)
         return jsonify({"success": True, "message": msg})
 
     except Exception as e:
+        log.error("Manual close failed: %s", e)
         return jsonify({"success": False, "error": str(e)})
 
 
