@@ -129,6 +129,12 @@ class PolymarketUSAuth:
         signature_bytes = self.sign_message(message)
         signature_b64 = base64.b64encode(signature_bytes).decode('utf-8')
         
+        # Debug logging (first time only to avoid spam)
+        if not hasattr(self, '_logged_auth_debug'):
+            logger.info(f"🔐 Auth debug: key_id={self.key_id[:8]}..., timestamp={timestamp}, method={method.upper()}, path={path}")
+            logger.info(f"🔐 Auth debug: signature (first 20 chars)={signature_b64[:20]}...")
+            self._logged_auth_debug = True
+        
         return {
             "X-PM-Access-Key": self.key_id,
             "X-PM-Timestamp": timestamp,
@@ -143,10 +149,17 @@ def get_auth_from_env() -> Optional[PolymarketUSAuth]:
     private_key = os.getenv("POLYMARKET_US_PRIVATE_KEY")
     
     if not key_id or not private_key:
+        logger.warning("⚠️  POLYMARKET_US_KEY_ID or POLYMARKET_US_PRIVATE_KEY not set")
         return None
     
+    # Log key ID (first 8 chars) for debugging
+    logger.info(f"🔑 Loading Polymarket US API auth: key_id={key_id[:8]}...{key_id[-4:] if len(key_id) > 12 else ''} (length: {len(key_id)})")
+    logger.info(f"🔑 Private key length: {len(private_key)} chars")
+    
     try:
-        return PolymarketUSAuth(key_id, private_key)
+        auth = PolymarketUSAuth(key_id, private_key)
+        logger.info("✅ Polymarket US API auth initialized successfully")
+        return auth
     except Exception as e:
-        logger.error(f"Failed to initialize auth: {e}")
+        logger.error(f"❌ Failed to initialize auth: {e}")
         return None
