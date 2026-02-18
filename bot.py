@@ -289,6 +289,13 @@ PRIORITY_KEYWORDS = {
     "stock", "s&p", "nasdaq", "dow", "spy", "qqq", "ipo", "market cap",
     "oil", "gold", "silver", "commodity",
     "recession", "unemployment", "economy", "economic",
+    "nba", "nfl", "nhl", "mlb", "premier league", "champions league", "la liga",
+    "serie a", "bundesliga", "ligue 1", "stanley cup", "super bowl",
+    "olympic", "olympics", "world cup", "uefa", "fifa",
+    "tennis", "golf", "formula 1", "f1", "ufc", "boxing",
+    "spread:", "o/u", "over/under", "moneyline",
+    "lakers", "celtics", "warriors", "knicks", "rockets", "grizzlies",
+    "manchester", "arsenal", "liverpool", "chelsea", "barcelona", "real madrid",
 }
 
 
