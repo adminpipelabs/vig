@@ -438,13 +438,16 @@ def score_market(token_id: str, client: ClobClient, label: str = "") -> dict | N
         if not bids or not asks:
             return None
         if best_ask < BUY_MIN or best_ask > BUY_MAX:
+            log.info("REJECT %s: ask=$%.3f outside $%.2f-$%.2f", label[:30], best_ask, BUY_MIN, BUY_MAX)
             return None
         if best_bid < BUY_MIN * 0.8:
+            log.info("REJECT %s: bid=$%.3f too low", label[:30], best_bid)
             return None
 
         spread = best_ask - best_bid
         spread_pct = spread / best_ask if best_ask > 0 else 1
         if spread_pct > MAX_SPREAD_PCT:
+            log.info("REJECT %s: spread=%.1f%% > %.1f%%  bid=$%.3f ask=$%.3f", label[:30], spread_pct*100, MAX_SPREAD_PCT*100, best_bid, best_ask)
             return None
 
         all_bid_usd = sum(float(b.price) * float(b.size) for b in bids)
@@ -1342,6 +1345,7 @@ def run():
 
                 priority = [c for c in candidates if _is_priority_market(c["question"])]
                 others = [c for c in candidates if not _is_priority_market(c["question"])]
+                log.info("Candidates: %d priority, %d other (from %d total)", len(priority), len(others), len(candidates))
 
                 check_pool = priority[:60]
                 remaining_slots = 80 - len(check_pool)
