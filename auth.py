@@ -167,6 +167,20 @@ def get_auth_from_env() -> Optional[PolymarketUSAuth]:
     logger.info(f"   Key ID: {key_id}")
     logger.info(f"   Key ID length: {len(key_id)} chars")
     logger.info(f"   Private key length: {len(private_key)} chars")
+    logger.info(f"   Private key (first 20): {private_key[:20]}...")
+    logger.info(f"   Private key (last 20): ...{private_key[-20:]}")
+    
+    # Verify private key matches expected format
+    try:
+        import base64
+        decoded = base64.b64decode(private_key.strip())
+        logger.info(f"   Private key decoded: {len(decoded)} bytes")
+        if len(decoded) >= 32:
+            logger.info(f"   ✅ Will use first 32 bytes for Ed25519")
+        else:
+            logger.error(f"   ❌ Private key too short: {len(decoded)} bytes (need 32)")
+    except Exception as e:
+        logger.error(f"   ❌ Failed to decode private key: {e}")
     
     try:
         auth = PolymarketUSAuth(key_id, private_key)
