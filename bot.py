@@ -317,6 +317,25 @@ def _parse_market_candidates(markets: list, active_token_ids: set) -> list:
     return found
 
 
+BLACKLIST_FILE = os.path.join(DATA_DIR, "blacklist.json")
+
+
+def load_blacklist() -> set:
+    try:
+        with open(BLACKLIST_FILE) as f:
+            return set(json.load(f))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return set()
+
+
+def save_blacklist(bl: set):
+    with open(BLACKLIST_FILE, "w") as f:
+        json.dump(list(bl), f)
+
+
+blacklisted_tokens: set = load_blacklist()
+
+
 def scan_markets(active_token_ids: set) -> list:
     """Scan all open markets, paginating through everything."""
     seen_tokens = set()
@@ -341,8 +360,9 @@ def scan_markets(active_token_ids: set) -> list:
             total_scanned += len(markets)
 
             for c in _parse_market_candidates(markets, active_token_ids):
-                if c["token_id"] not in seen_tokens:
-                    seen_tokens.add(c["token_id"])
+                tid = c["token_id"]
+                if tid not in seen_tokens and tid not in blacklisted_tokens:
+                    seen_tokens.add(tid)
                     qualifying.append(c)
 
             if len(markets) < page_size:
@@ -353,7 +373,8 @@ def scan_markets(active_token_ids: set) -> list:
             log.error("Scan page failed (offset %d): %s", offset, e)
             break
 
-    log.info("Scan — %d candidates (from %d total markets)", len(qualifying), total_scanned)
+    log.info("Scan — %d candidates (from %d total markets, %d blacklisted)",
+             len(qualifying), total_scanned, len(blacklisted_tokens))
 
     qualifying.sort(key=lambda m: m["volume"], reverse=True)
     return qualifying
@@ -361,39 +382,82 @@ def scan_markets(active_token_ids: set) -> list:
 
 # ── Order Placement ───────────────────────────────────────────────────────────
 
+STALE_ORDER_MINUTES = int(os.getenv("STALE_MINUTES", "30"))
+
+
+def score_market(token_id: str, client: ClobClient) -> dict | None:
+    """Score a market's order book quality. Returns None and blacklists junk."""
+    try:
+        book = client.get_order_book(token_id)
+        bids = getattr(book, "bids", [])
+        asks = getattr(book, "asks", [])
+        ltp = float(getattr(book, "last_trade_price", 0) or 0)
+
+        best_bid = float(bids[0].price) if bids else 0
+        best_ask = float(asks[0].price) if asks else 0
+
+        if not bids or not asks:
+            blacklisted_tokens.add(token_id)
+            save_blacklist(blacklisted_tokens)
+            return None
+
+        if best_bid < SELL_AT * 0.5:
+            blacklisted_tokens.add(token_id)
+            save_blacklist(blacklisted_tokens)
+            return None
+
+        spread = (best_ask - best_bid) / best_ask if best_ask > 0 else 1
+        if spread > 0.5:
+            return None
+
+        bid_depth = sum(float(b.size) * float(b.price) for b in bids[:5])
+        if bid_depth < 50:
+            return None
+
+        score = bid_depth * (1 - spread) * (1 + ltp)
+
+        return {
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "spread": spread,
+            "bid_depth": bid_depth,
+            "last_trade": ltp,
+            "score": score,
+        }
+    except Exception:
+        return None
+
+
 def place_buy(client: ClobClient, market: dict) -> dict | None:
-    """Place a BUY order — checks liquidity first, tries FOK then GTC."""
+    """Place a BUY order — scores market quality, buys only good ones."""
     token_id = market["token_id"]
     price = market["price"]
     tick = float(market.get("tick_size", 0.01))
     neg_risk = market.get("neg_risk", False)
 
-    try:
-        book = client.get_order_book(token_id)
-        bids = getattr(book, "bids", [])
-        asks = getattr(book, "asks", [])
+    mkt_info = score_market(token_id, client)
+    if not mkt_info:
+        log.info("SKIP: %s — failed quality checks", market["question"][:45])
+        return None
 
-        best_bid = float(bids[0].price) if bids else 0
-        best_ask = float(asks[0].price) if asks else 0
+    best_bid = mkt_info["best_bid"]
+    best_ask = mkt_info["best_ask"]
 
-        if best_bid < SELL_AT * 0.5:
-            log.info("SKIP: %s — best bid $%.3f too low (need >$%.2f)",
-                     market["question"][:45], best_bid, SELL_AT * 0.5)
-            return None
-
-        if best_ask > 0 and best_ask < price:
-            price = best_ask
-
-    except Exception as e:
-        log.debug("Book check failed for %s: %s", token_id[:20], e)
+    if best_ask > 0 and best_ask <= BUY_BELOW:
+        price = best_ask
+    elif best_ask > BUY_BELOW:
+        log.info("SKIP: %s — ask $%.3f > buy limit $%.2f",
+                 market["question"][:45], best_ask, BUY_BELOW)
+        return None
 
     size = round(BET_SIZE / price, 2)
     cost = round(price * size, 2)
 
     log.info(
-        "BUY: %s | %.0f shares @ $%.2f = $%.2f (bid=$%.3f)",
-        market["question"][:45],
-        size, price, cost, best_bid if 'best_bid' in dir() else 0,
+        "BUY: %s | %.0f @ $%.3f=$%.2f bid=$%.3f ask=$%.3f spread=%.0f%% depth=$%.0f",
+        market["question"][:35],
+        size, price, cost, best_bid, best_ask,
+        mkt_info["spread"] * 100, mkt_info["bid_depth"],
     )
 
     try:
@@ -464,22 +528,42 @@ def place_buy(client: ClobClient, market: dict) -> dict | None:
 
 
 def place_sell(client: ClobClient, position: dict) -> bool:
-    """Place a SELL limit order at SELL_AT target price."""
+    """Place a SELL limit order — uses dynamic pricing based on order book."""
     token_id = position["token_id"]
     size = position["size"]
     tick = float(position.get("tick_size", 0.01))
     neg_risk = position.get("neg_risk", False)
+    buy_price = position.get("buy_price", 0)
+
+    sell_price = SELL_AT
+
+    try:
+        book = client.get_order_book(token_id)
+        bids = getattr(book, "bids", [])
+        best_bid = float(bids[0].price) if bids else 0
+
+        if best_bid > sell_price:
+            sell_price = min(best_bid + tick, 0.99)
+
+        min_profit = buy_price * 1.15
+        if sell_price < min_profit:
+            sell_price = max(sell_price, min_profit)
+    except Exception:
+        pass
+
+    sell_price = round(sell_price, 4)
+    position["sell_target"] = sell_price
 
     log.info(
-        "SELL: %s | %.0f shares @ $%.2f",
-        position["question"][:55],
-        size, SELL_AT,
+        "SELL: %s | %.0f shares @ $%.4f (bought $%.3f, target min $%.3f)",
+        position["question"][:40],
+        size, sell_price, buy_price, SELL_AT,
     )
 
     try:
         sell_args = OrderArgs(
             token_id=token_id,
-            price=round(SELL_AT, 4),
+            price=sell_price,
             size=size,
             side=SELL,
         )
@@ -500,7 +584,7 @@ def place_sell(client: ClobClient, position: dict) -> bool:
         add_trade({
             "type": "SELL",
             "question": position["question"][:80],
-            "price": SELL_AT,
+            "price": sell_price,
             "size": size,
             "time": datetime.now(timezone.utc).isoformat(),
         })
@@ -1087,7 +1171,23 @@ def run():
             log.info("── Tick ──────────────────────────────────────────")
             log.info("Positions: %d / %d", len(positions), MAX_BETS)
 
-            # 1. Check pending buys — if filled, place sell
+            # 1. Auto-cancel stale pending orders
+            now = datetime.now(timezone.utc)
+            for pos in positions:
+                if pos["status"] == "pending":
+                    try:
+                        placed = datetime.fromisoformat(pos["placed_at"]).replace(tzinfo=timezone.utc)
+                    except (ValueError, KeyError):
+                        continue
+                    age_min = (now - placed).total_seconds() / 60
+                    if age_min > STALE_ORDER_MINUTES:
+                        log.info("AUTO-CANCEL: %s (pending %.0f min)",
+                                 pos["question"][:40], age_min)
+                        cancel_order(clob, pos["buy_order_id"])
+                        close_position(pos, "expired", 0)
+                        pos["status"] = "done"
+
+            # 2. Check pending buys — if filled, place sell
             for pos in positions:
                 if pos["status"] == "pending":
                     if check_order_filled(clob, pos["buy_order_id"]):
@@ -1098,18 +1198,37 @@ def run():
 
                 elif pos["status"] == "held":
                     if pos.get("sell_order_id") and check_order_filled(clob, pos["sell_order_id"]):
-                        log.info("Sell filled: %s", pos["question"][:50])
+                        actual_sell = pos.get("sell_target", SELL_AT)
+                        log.info("Sell filled: %s @ $%.3f", pos["question"][:50], actual_sell)
                         pos["status"] = "done"
-                        close_position(pos, "sold", SELL_AT)
+                        close_position(pos, "sold", actual_sell)
                         add_trade({
                             "type": "SELL",
                             "question": pos["question"][:80],
-                            "price": SELL_AT,
+                            "price": actual_sell,
                             "size": pos["size"],
                             "time": datetime.now(timezone.utc).isoformat(),
                         })
 
-            # 2. Check resolved markets — claim on-chain
+            # 3. Re-price stale sell orders if market moved up
+            for pos in positions:
+                if pos["status"] == "held" and pos.get("sell_order_id"):
+                    try:
+                        info = score_market(pos["token_id"], clob)
+                        if info and info["best_bid"] > pos.get("sell_target", SELL_AT) * 1.05:
+                            new_target = min(info["best_bid"] + float(pos.get("tick_size", 0.01)), 0.99)
+                            log.info("REPRICE: %s sell $%.3f → $%.3f (bid=$%.3f)",
+                                     pos["question"][:35], pos.get("sell_target", SELL_AT),
+                                     new_target, info["best_bid"])
+                            cancel_order(clob, pos["sell_order_id"])
+                            pos["sell_target"] = new_target
+                            pos["sell_order_id"] = None
+                            place_sell(clob, pos)
+                            save_positions(positions)
+                    except Exception:
+                        pass
+
+            # 4. Check resolved markets — claim on-chain
             for pos in positions:
                 if pos["status"] in ("pending", "held"):
                     if check_market_resolved(pos):
@@ -1118,12 +1237,12 @@ def run():
                         exit_price = 1.0 if claimed else 0.0
                         close_position(pos, "claimed" if claimed else "expired", exit_price)
 
-            # 3. Remove done positions
+            # 5. Remove done positions
             positions = [p for p in positions if p["status"] != "done"]
             save_positions(positions)
             bot_state["positions"] = positions
 
-            # 4. Fill empty slots with new buys
+            # 6. Fill empty slots with new buys
             slots = MAX_BETS - len(positions)
             log.info("Open slots: %d", slots)
 
