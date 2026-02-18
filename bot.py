@@ -401,7 +401,7 @@ def score_market(token_id: str, client: ClobClient) -> dict | None:
             save_blacklist(blacklisted_tokens)
             return None
 
-        if best_bid < SELL_AT * 0.5:
+        if best_bid < 0.02:
             blacklisted_tokens.add(token_id)
             save_blacklist(blacklisted_tokens)
             return None
@@ -411,7 +411,7 @@ def score_market(token_id: str, client: ClobClient) -> dict | None:
             return None
 
         bid_depth = sum(float(b.size) * float(b.price) for b in bids[:5])
-        if bid_depth < 50:
+        if bid_depth < BET_SIZE * 2:
             return None
 
         score = bid_depth * (1 - spread) * (1 + ltp)
