@@ -1,18 +1,12 @@
-# Keep .dockerignore minimal - only exclude what's truly not needed
 *.md
 !README.md
 *.log
-*.sh
-!setup.sh
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
-.Python
 venv/
-env/
 .env
+.env.save
 *.db
-*.sqlite
+positions.json
 .git/
 .gitignore

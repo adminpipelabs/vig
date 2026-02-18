@@ -1,10 +1,8 @@
-# Railway configuration for Vig v2
-# Railway uses railway.json for configuration
-# This file is kept for reference but railway.json takes precedence
-
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
-# Note: startCommand is set in railway.json, not here
-# railway.json: "uvicorn dashboard:app --host 0.0.0.0 --port $PORT"
+[deploy]
+startCommand = "python -u bot.py"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
