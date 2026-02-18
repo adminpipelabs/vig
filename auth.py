@@ -29,23 +29,50 @@ class PolymarketUSAuth:
     
     def _load_private_key(self, key_str: str) -> Ed25519PrivateKey:
         """Load Ed25519 private key from string"""
+        # Strip whitespace
+        key_str = key_str.strip()
+        
         try:
-            # Try base64 first (most common format from Polymarket)
-            if len(key_str) == 64:  # Raw 32 bytes as hex
+            # Try hex format (64 hex chars = 32 bytes)
+            if len(key_str) == 64 and all(c in '0123456789abcdefABCDEF' for c in key_str):
                 key_bytes = bytes.fromhex(key_str)
-                return Ed25519PrivateKey.from_private_bytes(key_bytes)
-            elif len(key_str) == 88:  # Base64 encoded
-                key_bytes = base64.b64decode(key_str)
-                return Ed25519PrivateKey.from_private_bytes(key_bytes)
-            else:
-                # Try PEM format
-                return serialization.load_pem_private_key(
+                if len(key_bytes) == 32:
+                    return Ed25519PrivateKey.from_private_bytes(key_bytes)
+            
+            # Try base64 format (44 chars unpadded, 88 chars with padding)
+            try:
+                key_bytes = base64.b64decode(key_str, validate=True)
+                if len(key_bytes) == 32:
+                    return Ed25519PrivateKey.from_private_bytes(key_bytes)
+            except:
+                pass
+            
+            # Try PEM format
+            try:
+                key_obj = serialization.load_pem_private_key(
                     key_str.encode(),
                     password=None
                 )
+                if isinstance(key_obj, Ed25519PrivateKey):
+                    return key_obj
+            except:
+                pass
+            
+            # If we get here, try to decode as base64 even if length doesn't match
+            try:
+                key_bytes = base64.b64decode(key_str)
+                if len(key_bytes) == 32:
+                    return Ed25519PrivateKey.from_private_bytes(key_bytes)
+            except:
+                pass
+            
+            raise ValueError(f"Key length is {len(key_str)} chars. Ed25519 private key must be 32 bytes (64 hex chars, 44 base64 chars, or PEM format)")
+            
+        except ValueError:
+            raise
         except Exception as e:
             logger.error(f"Failed to load private key: {e}")
-            raise ValueError(f"Invalid Ed25519 private key format: {e}")
+            raise ValueError(f"Invalid Ed25519 private key format: {e}. Expected: 64 hex chars, base64 (44/88 chars), or PEM format")
     
     def sign_message(self, message: bytes) -> bytes:
         """Sign message with Ed25519 private key"""

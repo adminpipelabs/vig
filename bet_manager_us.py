@@ -68,14 +68,21 @@ class BetManagerUS:
         def place_single_bet(market_clip_tuple):
             market, clip = market_clip_tuple
             try:
+                # Validate price per API spec (0.001-0.999)
+                if market.fav_price < 0.001 or market.fav_price > 0.999:
+                    logger.warning(f"Skipping {market.slug}: price {market.fav_price:.3f} out of valid range (0.001-0.999)")
+                    return None
+                
                 # Calculate quantity (shares)
                 quantity = int(clip / market.fav_price)
                 if quantity < 1:
                     logger.debug(f"Skipping {market.slug}: quantity too small ({quantity})")
                     return None
                 
-                # Calculate profit target price
-                profit_target_price = min(0.99, market.fav_price + self.config.profit_target_pct)
+                # Calculate profit target price (cap at 0.999 per API spec)
+                profit_target_price = min(0.999, market.fav_price + self.config.profit_target_pct)
+                if profit_target_price < 0.001:
+                    profit_target_price = 0.001
                 
                 if self.config.paper_mode:
                     # Paper mode - just create bet record

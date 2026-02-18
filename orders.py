@@ -52,7 +52,7 @@ class PolymarketUSOrders:
         Args:
             market_slug: Market slug (e.g., "nyc-temp-above-50-feb-17")
             intent: ORDER_INTENT_BUY_LONG, ORDER_INTENT_SELL_LONG, etc.
-            price: Price for YES side (0.0-1.0)
+            price: Price for YES side (0.001-0.999 per API spec)
             quantity: Number of shares
             order_type: ORDER_TYPE_LIMIT or ORDER_TYPE_MARKET
             tif: Time in force
@@ -60,16 +60,34 @@ class PolymarketUSOrders:
         
         Returns:
             Order response dict or None if failed
+        
+        Note: price.value always represents YES/long side price, even when buying NO.
+        Per API docs: "price.value always refers to the long side's price"
         """
+        # Validate price per API spec: must be between 0.001 and 0.999
+        if price < 0.001 or price > 0.999:
+            logger.error(f"❌ Invalid price {price:.3f}: must be between 0.001 and 0.999")
+            return None
+        
+        # Validate quantity
+        if quantity < 1:
+            logger.error(f"❌ Invalid quantity {quantity}: must be >= 1")
+            return None
+        
         path = "/v1/orders"
         headers = self.auth.get_auth_headers("POST", path)
+        
+        # Format price as string per API spec
+        price_str = f"{price:.3f}".rstrip('0').rstrip('.')
+        if price_str == "1":
+            price_str = "0.999"  # Cap at max allowed
         
         payload = {
             "marketSlug": market_slug,
             "type": order_type,
             "intent": intent,
             "price": {
-                "value": str(price),
+                "value": price_str,
                 "currency": "USD"
             },
             "quantity": quantity,
