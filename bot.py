@@ -411,10 +411,6 @@ def scan_markets(active_token_ids: set) -> list:
                 for c in _parse_market_candidates(markets, active_token_ids):
                     tid = c["token_id"]
                     if tid not in seen_tokens and tid not in blacklisted_tokens:
-                        ba = float(c.get("best_ask") or c.get("price") or 0)
-                        bb = float(c.get("best_bid") or 0)
-                        if ba > 0 and (ba < BUY_MIN or ba > BUY_MAX):
-                            continue
                         seen_tokens.add(tid)
                         qualifying.append(c)
 
