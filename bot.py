@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 from flask import Flask, request as flask_request, jsonify, Response
 
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, OrderType
+from py_clob_client.clob_types import OrderArgs, OrderType, CreateOrderOptions
 from py_clob_client.order_builder.constants import BUY, SELL
 from py_clob_client.constants import POLYGON
 
@@ -303,7 +303,7 @@ def place_buy(client: ClobClient, market: dict) -> dict | None:
             size=size,
             side=BUY,
         )
-        opts = {"tick_size": str(tick), "neg_risk": neg_risk}
+        opts = CreateOrderOptions(tick_size=str(tick), neg_risk=neg_risk)
         signed = client.create_order(buy_args, options=opts)
         result = client.post_order(signed, OrderType.GTC)
 
@@ -369,7 +369,7 @@ def place_sell(client: ClobClient, position: dict) -> bool:
             size=size,
             side=SELL,
         )
-        opts = {"tick_size": str(tick), "neg_risk": neg_risk}
+        opts = CreateOrderOptions(tick_size=str(tick), neg_risk=neg_risk)
         signed = client.create_order(sell_args, options=opts)
         result = client.post_order(signed, OrderType.GTC)
 
