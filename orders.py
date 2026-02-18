@@ -99,6 +99,16 @@ class PolymarketUSOrders:
             payload["slippageTolerance"] = slippage_tolerance
         
         try:
+            # Log request details for debugging (first time only)
+            if not hasattr(self, '_logged_request_debug'):
+                logger.info(f"🌐 API Request Debug:")
+                logger.info(f"   URL: {BASE_URL}{path}")
+                logger.info(f"   Method: POST")
+                logger.info(f"   Headers: X-PM-Access-Key={headers.get('X-PM-Access-Key', 'MISSING')[:8]}...")
+                logger.info(f"   Headers: X-PM-Timestamp={headers.get('X-PM-Timestamp', 'MISSING')}")
+                logger.info(f"   Headers: X-PM-Signature={headers.get('X-PM-Signature', 'MISSING')[:20]}...")
+                self._logged_request_debug = True
+            
             response = self.client.post(
                 f"{BASE_URL}{path}",
                 headers=headers,
@@ -109,10 +119,22 @@ class PolymarketUSOrders:
             logger.info(f"✅ Order placed: {intent} {quantity} @ ${price:.2f} on {market_slug}")
             return result
         except httpx.HTTPStatusError as e:
-            logger.error(f"❌ Order failed ({e.response.status_code}): {e.response.text}")
+            error_text = e.response.text
+            logger.error(f"❌ Order failed ({e.response.status_code}): {error_text}")
+            
+            # If 401, log detailed auth info
+            if e.response.status_code == 401:
+                logger.error(f"🔐 Authentication Debug:")
+                logger.error(f"   Key ID sent: {headers.get('X-PM-Access-Key', 'MISSING')}")
+                logger.error(f"   Timestamp sent: {headers.get('X-PM-Timestamp', 'MISSING')}")
+                logger.error(f"   Error: {error_text}")
+                logger.error(f"   ⚠️  Verify POLYMARKET_US_KEY_ID matches your Polymarket dashboard exactly")
+            
             return None
         except Exception as e:
             logger.error(f"❌ Order error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
     
     def close_position(self, market_slug: str) -> Optional[Dict]:
