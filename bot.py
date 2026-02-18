@@ -524,7 +524,14 @@ def place_buy(client: ClobClient, market: dict) -> dict | None:
     if price < BUY_MIN or price > BUY_MAX:
         return None
 
-    size = round(BET_SIZE / price, 2)
+    bal = get_usdc_balance()
+    if bal < BET_SIZE * 1.1:
+        log.info("SKIP: low balance $%.2f", bal)
+        return None
+
+    size = int(BET_SIZE / price)
+    if size < 1:
+        return None
     cost = round(price * size, 2)
 
     log.info(
