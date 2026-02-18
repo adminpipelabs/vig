@@ -406,19 +406,22 @@ def score_market(token_id: str, client: ClobClient, label: str = "") -> dict | N
         if n_bids < 2 or n_asks < 1:
             return None
 
-        our_entry = min(best_bid, BUY_BELOW)
-        if our_entry < 0.02 or our_entry > BUY_BELOW:
+        if best_ask > BUY_BELOW:
+            return None
+        if best_ask < 0.02:
+            return None
+        if best_bid < 0.01:
             return None
 
+        spread = best_ask - best_bid
         all_bid_usd = sum(float(b.price) * float(b.size) for b in bids)
         all_ask_usd = sum(float(a.price) * float(a.size) for a in asks)
-        spread = (best_ask - best_bid) / best_ask if best_ask > 0 else 1
 
         score = (
             (all_bid_usd + 1)
             * (1 + min(n_bids, 20) / 5)
             * (1 + min(all_ask_usd, 500) / 100)
-            * max(0.1, 1 - spread)
+            * max(0.01, 1 - spread)
         )
 
         return {
@@ -430,7 +433,6 @@ def score_market(token_id: str, client: ClobClient, label: str = "") -> dict | N
             "n_asks": n_asks,
             "spread": spread,
             "last_trade": ltp,
-            "our_entry": our_entry,
             "score": score,
         }
     except Exception as e:
@@ -452,7 +454,11 @@ def place_buy(client: ClobClient, market: dict) -> dict | None:
     best_bid = info["best_bid"]
     best_ask = info["best_ask"]
 
-    price = round(info["our_entry"], 2)
+    price = round(best_bid + tick, 2)
+    if price > best_ask:
+        price = best_ask
+    if price > BUY_BELOW:
+        price = BUY_BELOW
     if price < 0.02:
         return None
 
@@ -460,9 +466,9 @@ def place_buy(client: ClobClient, market: dict) -> dict | None:
     cost = round(price * size, 2)
 
     log.info(
-        "BID: %s | %.0f@$%.2f=$%.2f bid=$%.2f ask=$%.2f bids=%d depth=$%.0f",
+        "BID: %s | %.0f@$%.2f=$%.2f bid=$%.2f ask=$%.2f spread=$%.3f depth=$%.0f",
         market["question"][:30],
-        size, price, cost, best_bid, best_ask, info["n_bids"], info["all_bid_usd"],
+        size, price, cost, best_bid, best_ask, best_ask - best_bid, info["all_bid_usd"],
     )
 
     try:
