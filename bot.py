@@ -223,10 +223,13 @@ def build_clob_client() -> ClobClient:
 
     try:
         collateral = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
-        conditional = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL))
-        log.info("Allowances — USDC: %s  Conditional: %s", collateral, conditional)
+        log.info("USDC allowance: %s", collateral)
+    except Exception as e:
+        log.warning("Could not check USDC allowance: %s", e)
+
+    try:
         client.set_allowances()
-        log.info("Allowances set for USDC + conditional tokens")
+        log.info("Exchange approvals set (USDC + conditional tokens)")
     except Exception as e:
         log.warning("Could not set allowances: %s", e)
 
