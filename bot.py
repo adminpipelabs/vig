@@ -382,15 +382,14 @@ def scan_markets(active_token_ids: set) -> list:
 # ── Order Placement ───────────────────────────────────────────────────────────
 
 STALE_ORDER_MINUTES = int(os.getenv("STALE_MINUTES", "30"))
-MIN_BOOK_USD = float(os.getenv("MIN_BOOK_USD", "30"))
 
 
 def score_market(token_id: str, client: ClobClient, label: str = "") -> dict | None:
     """
-    New strategy: find markets with REAL recent activity, then WE set the price.
-    - Use last_trade_price to confirm the market is alive
-    - Measure bid depth we'd sell into
-    - We'll place limit buys — don't need cheap asks
+    Flip the scammers' playbook:
+    - Find markets with real order books (multiple bid/ask levels)
+    - We place limit buys at OUR price — we're the smart bid
+    - Score by: bid depth, number of levels, last trade recency
     """
     tag = label[:30] if label else token_id[:12]
     try:
@@ -401,53 +400,40 @@ def score_market(token_id: str, client: ClobClient, label: str = "") -> dict | N
 
         best_bid = float(bids[0].price) if bids else 0
         best_ask = float(asks[0].price) if asks else 0
+        n_bids = len(bids)
+        n_asks = len(asks)
 
-        if not bids or not asks:
-            blacklisted_tokens.add(token_id)
-            save_blacklist(blacklisted_tokens)
+        if n_bids < 2 or n_asks < 1:
             return None
 
-        if ltp < 0.05 or ltp > 0.50:
+        our_entry = min(best_bid, BUY_BELOW)
+        if our_entry < 0.02 or our_entry > BUY_BELOW:
             return None
 
-        if best_bid < 0.03:
-            return None
-
-        exit_bids_usd = sum(
-            float(b.price) * float(b.size)
-            for b in bids if float(b.price) >= SELL_AT * 0.7
-        )
-
-        all_bid_usd = sum(float(b.price) * float(b.size) for b in bids[:10])
-
-        if all_bid_usd < MIN_BOOK_USD:
-            return None
-
-        our_buy_price = min(best_bid, BUY_BELOW)
-        potential_profit = (SELL_AT - our_buy_price) / our_buy_price if our_buy_price > 0 else 0
-
+        all_bid_usd = sum(float(b.price) * float(b.size) for b in bids)
+        all_ask_usd = sum(float(a.price) * float(a.size) for a in asks)
         spread = (best_ask - best_bid) / best_ask if best_ask > 0 else 1
 
         score = (
-            all_bid_usd
-            * (1 + exit_bids_usd)
-            * (1 + potential_profit)
-            * (1 - min(spread, 0.9))
-            * (1 + min(ltp, 0.5))
+            (all_bid_usd + 1)
+            * (1 + min(n_bids, 20) / 5)
+            * (1 + min(all_ask_usd, 500) / 100)
+            * max(0.1, 1 - spread)
         )
 
         return {
             "best_bid": best_bid,
             "best_ask": best_ask,
             "all_bid_usd": all_bid_usd,
-            "exit_bids_usd": exit_bids_usd,
+            "all_ask_usd": all_ask_usd,
+            "n_bids": n_bids,
+            "n_asks": n_asks,
             "spread": spread,
             "last_trade": ltp,
-            "our_buy_price": our_buy_price,
+            "our_entry": our_entry,
             "score": score,
         }
     except Exception as e:
-        log.debug("REJECT %s: error %s", tag, e)
         return None
 
 
@@ -465,11 +451,8 @@ def place_buy(client: ClobClient, market: dict) -> dict | None:
 
     best_bid = info["best_bid"]
     best_ask = info["best_ask"]
-    ltp = info["last_trade"]
 
-    price = min(best_bid + tick, BUY_BELOW)
-    price = round(price, 2)
-
+    price = round(info["our_entry"], 2)
     if price < 0.02:
         return None
 
@@ -477,9 +460,9 @@ def place_buy(client: ClobClient, market: dict) -> dict | None:
     cost = round(price * size, 2)
 
     log.info(
-        "BID: %s | %.0f @ $%.2f=$%.2f (ltp=$%.2f bid=$%.2f ask=$%.2f depth=$%.0f)",
+        "BID: %s | %.0f@$%.2f=$%.2f bid=$%.2f ask=$%.2f bids=%d depth=$%.0f",
         market["question"][:30],
-        size, price, cost, ltp, best_bid, best_ask, info["all_bid_usd"],
+        size, price, cost, best_bid, best_ask, info["n_bids"], info["all_bid_usd"],
     )
 
     try:
@@ -1139,6 +1122,38 @@ def api_close():
         return jsonify({"success": False, "error": str(e)})
 
 
+@flask_app.route("/api/scan")
+def api_scan():
+    """Diagnostic: run a quick scan and show what the bot sees."""
+    if not clob_client:
+        return jsonify({"error": "bot not ready"})
+    try:
+        results = []
+        active_ids = {p["token_id"] for p in bot_state.get("positions", [])}
+        candidates = scan_markets(active_ids)
+        sample = random.sample(candidates[:3000], min(30, len(candidates)))
+        for mkt in sample:
+            info = score_market(mkt["token_id"], clob_client, mkt["question"])
+            results.append({
+                "question": mkt["question"][:60],
+                "gamma_price": mkt["price"],
+                "volume": mkt["volume"],
+                "score": info["score"] if info else None,
+                "best_bid": info["best_bid"] if info else None,
+                "best_ask": info["best_ask"] if info else None,
+                "n_bids": info["n_bids"] if info else None,
+                "bid_depth": info["all_bid_usd"] if info else None,
+                "passed": info is not None,
+            })
+        passed = [r for r in results if r["passed"]]
+        failed = [r for r in results if not r["passed"]]
+        return jsonify({"total_candidates": len(candidates), "sampled": len(results),
+                        "passed": len(passed), "failed": len(failed),
+                        "results": sorted(results, key=lambda r: r["score"] or 0, reverse=True)})
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
 def start_dashboard():
     log.info("Dashboard on port %d", PORT)
     flask_app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
@@ -1282,7 +1297,7 @@ def run():
                 log.info("Scored %d/%d — top: %s",
                          len(scored), len(check_pool),
                          " | ".join(
-                             f"ltp=${m['_score']['last_trade']:.2f} depth=${m['_score']['all_bid_usd']:.0f}"
+                             f"bid${m['_score']['all_bid_usd']:.0f}({m['_score']['n_bids']}lvl)@${m['_score']['best_bid']:.2f}"
                              for m in scored[:5]
                          ))
 
