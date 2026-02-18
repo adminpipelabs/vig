@@ -362,19 +362,38 @@ def scan_markets(active_token_ids: set) -> list:
 # ── Order Placement ───────────────────────────────────────────────────────────
 
 def place_buy(client: ClobClient, market: dict) -> dict | None:
-    """Place a BUY order — tries FOK (instant fill), falls back to GTC (limit)."""
+    """Place a BUY order — checks liquidity first, tries FOK then GTC."""
     token_id = market["token_id"]
     price = market["price"]
     tick = float(market.get("tick_size", 0.01))
     neg_risk = market.get("neg_risk", False)
 
+    try:
+        book = client.get_order_book(token_id)
+        bids = getattr(book, "bids", [])
+        asks = getattr(book, "asks", [])
+
+        best_bid = float(bids[0].price) if bids else 0
+        best_ask = float(asks[0].price) if asks else 0
+
+        if best_bid < SELL_AT * 0.5:
+            log.info("SKIP: %s — best bid $%.3f too low (need >$%.2f)",
+                     market["question"][:45], best_bid, SELL_AT * 0.5)
+            return None
+
+        if best_ask > 0 and best_ask < price:
+            price = best_ask
+
+    except Exception as e:
+        log.debug("Book check failed for %s: %s", token_id[:20], e)
+
     size = round(BET_SIZE / price, 2)
     cost = round(price * size, 2)
 
     log.info(
-        "BUY: %s | %.0f shares @ $%.2f = $%.2f",
-        market["question"][:55],
-        size, price, cost,
+        "BUY: %s | %.0f shares @ $%.2f = $%.2f (bid=$%.3f)",
+        market["question"][:45],
+        size, price, cost, best_bid if 'best_bid' in dir() else 0,
     )
 
     try:
