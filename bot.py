@@ -27,8 +27,19 @@ from py_clob_client.order_builder.constants import BUY, SELL
 from py_clob_client.constants import POLYGON
 
 from web3 import Web3
+import httpx
 
 load_dotenv()
+
+# Route py-clob-client's httpx requests through residential proxy
+_PROXY_URL = os.getenv("RESIDENTIAL_PROXY_URL") or os.getenv("PROXY_URL")
+if _PROXY_URL:
+    _OrigClient = httpx.Client
+    class _ProxiedClient(_OrigClient):
+        def __init__(self, **kwargs):
+            kwargs.setdefault("proxy", _PROXY_URL)
+            super().__init__(**kwargs)
+    httpx.Client = _ProxiedClient
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
