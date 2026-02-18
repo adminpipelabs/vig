@@ -20,7 +20,7 @@ import json
 import time
 import logging
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 from py_clob_client.client import ClobClient
@@ -138,16 +138,18 @@ def scan_markets(active_token_ids: set) -> list:
     """
     qualifying = []
     now = datetime.now(timezone.utc)
+    end_max = now + timedelta(minutes=EXPIRY_WINDOW)
 
     try:
         resp = requests.get(
             f"{GAMMA_API}/markets",
             params={
-                "active": "true",
                 "closed": "false",
                 "limit": 100,
-                "order": "end_date_min",
+                "order": "endDate",
                 "ascending": "true",
+                "end_date_min": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "end_date_max": end_max.strftime("%Y-%m-%dT%H:%M:%SZ"),
             },
             timeout=10,
         )
@@ -156,31 +158,44 @@ def scan_markets(active_token_ids: set) -> list:
 
         for market in markets:
             try:
-                # Parse expiry
-                end_str = market.get("end_date_iso") or market.get("endDateIso")
+                end_str = market.get("endDateIso") or market.get("end_date_iso")
                 if not end_str:
                     continue
                 end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
                 mins_to_expiry = (end_dt - now).total_seconds() / 60
 
-                # Must expire within window and not already expired
-                if not (0 < mins_to_expiry <= EXPIRY_WINDOW):
+                if mins_to_expiry <= 0:
                     continue
 
-                # Get YES token and price
-                tokens = market.get("tokens", [])
-                yes_token = next((t for t in tokens if t.get("outcome", "").upper() == "YES"), None)
-                if not yes_token:
+                tokens = market.get("clobTokenIds")
+                outcome_prices = market.get("outcomePrices")
+                outcomes = market.get("outcomes")
+
+                if not tokens or not outcome_prices or not outcomes:
                     continue
 
-                token_id = yes_token.get("token_id")
-                price = float(yes_token.get("price", 0))
+                try:
+                    token_list = json.loads(tokens) if isinstance(tokens, str) else tokens
+                    price_list = json.loads(outcome_prices) if isinstance(outcome_prices, str) else outcome_prices
+                    outcome_list = json.loads(outcomes) if isinstance(outcomes, str) else outcomes
+                except (json.JSONDecodeError, TypeError):
+                    continue
 
-                # Price filter
+                yes_idx = None
+                for i, o in enumerate(outcome_list):
+                    if str(o).upper() == "YES":
+                        yes_idx = i
+                        break
+
+                if yes_idx is None or yes_idx >= len(token_list) or yes_idx >= len(price_list):
+                    continue
+
+                token_id = token_list[yes_idx]
+                price = float(price_list[yes_idx])
+
                 if not (MIN_PRICE <= price <= MAX_PRICE):
                     continue
 
-                # Skip if already held
                 if token_id in active_token_ids:
                     continue
 
@@ -188,7 +203,7 @@ def scan_markets(active_token_ids: set) -> list:
                     "market_id": market.get("id"),
                     "question": market.get("question", "Unknown"),
                     "token_id": token_id,
-                    "condition_id": market.get("condition_id"),
+                    "condition_id": market.get("conditionId"),
                     "price": price,
                     "mins_to_expiry": round(mins_to_expiry, 1),
                     "end_date": end_str,
