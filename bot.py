@@ -251,27 +251,30 @@ def scan_markets(active_token_ids: set) -> list:
                 except (json.JSONDecodeError, TypeError):
                     continue
 
-                yes_idx = None
-                for i, o in enumerate(outcome_list):
-                    if str(o).upper() == "YES":
-                        yes_idx = i
-                        break
+                best_idx = None
+                best_price = 0.0
+                for i in range(min(len(token_list), len(price_list), len(outcome_list))):
+                    p = float(price_list[i])
+                    if MIN_PRICE <= p <= MAX_PRICE and p > best_price:
+                        best_price = p
+                        best_idx = i
 
-                if yes_idx is None or yes_idx >= len(token_list) or yes_idx >= len(price_list):
+                if best_idx is None:
                     continue
 
-                token_id = token_list[yes_idx]
-                price = float(price_list[yes_idx])
-
-                if not (MIN_PRICE <= price <= MAX_PRICE):
-                    continue
+                token_id = token_list[best_idx]
+                outcome_name = str(outcome_list[best_idx])
+                price = best_price
 
                 if token_id in active_token_ids:
                     continue
 
+                question = market.get("question", "Unknown")
+                label = f"{question} → {outcome_name}"
+
                 qualifying.append({
                     "market_id": market.get("id"),
-                    "question": market.get("question", "Unknown"),
+                    "question": label,
                     "token_id": token_id,
                     "condition_id": market.get("conditionId"),
                     "price": price,
