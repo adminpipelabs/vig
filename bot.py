@@ -816,7 +816,8 @@ function timeFmt(s){if(!s)return'--';const d=new Date(s);return d.toLocaleDateSt
 
 async function refresh(){
   try{
-    const r=await fetch('/api/status');
+    const r=await fetch('/api/status',{signal:AbortSignal.timeout(8000)});
+    if(!r.ok){document.getElementById('sub').textContent='Server error ('+r.status+')';return}
     const d=await r.json();
 
     document.getElementById('dot').className='dot '+(d.running?'on':'off');
@@ -825,8 +826,8 @@ async function refresh(){
       ?'Running \u00b7 Last tick '+tick+' \u00b7 Poll '+d.config.poll_seconds+'s':'Offline';
     document.getElementById('wallet').textContent=d.wallet||'';
     document.getElementById('strat').textContent=
-      'Buy below $'+d.config.buy_below.toFixed(2)+' \u2192 Sell at $'+d.config.sell_at.toFixed(2)+
-      ' \u00b7 $'+d.config.bet_size+'/bet \u00b7 Min vol $'+d.config.min_volume.toLocaleString();
+      'Buy '+d.config.buy_range+' \u2192 +'+d.config.profit_target+' profit'+
+      ' \u00b7 $'+d.config.bet_size+'/bet \u00b7 Spread \u2264'+d.config.max_spread;
 
     document.getElementById('bal').textContent='$'+d.usdc_balance.toFixed(2);
     document.getElementById('active').textContent=d.active_positions+'/'+d.max_bets;
@@ -897,8 +898,7 @@ async function refresh(){
       te.innerHTML=h+'</table>';
     }
   }catch(e){
-    document.getElementById('dot').className='dot off';
-    document.getElementById('sub').textContent='Connection error';
+    document.getElementById('sub').textContent='Reconnecting... (bot busy scanning)';
   }
 }
 
@@ -1152,7 +1152,7 @@ def api_scan():
 
 def start_dashboard():
     log.info("Dashboard on port %d", PORT)
-    flask_app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
+    flask_app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False, threaded=True)
 
 
 # ── Main Loop ─────────────────────────────────────────────────────────────────
