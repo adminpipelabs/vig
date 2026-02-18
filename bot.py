@@ -1174,15 +1174,12 @@ def api_close():
             bids = getattr(book, "bids", [])
             ltp = float(getattr(book, "last_trade_price", 0) or 0)
 
-            good_bids = [b for b in bids if float(b.price) >= buy_price]
-            if good_bids:
-                sell_price = float(good_bids[-1].price)
-            elif ltp >= buy_price:
-                sell_price = round(ltp * 0.95, 4)
-            else:
-                return jsonify({"success": False,
-                    "error": f"No buyers above your buy price (${buy_price:.3f}). "
-                             f"Best bid: ${float(bids[-1].price):.3f}" if bids else "No bids at all"})
+            if not bids:
+                return jsonify({"success": False, "error": "No bids at all — cannot sell"})
+
+            sell_price = float(bids[-1].price)
+            if sell_price < 0.001:
+                return jsonify({"success": False, "error": f"Best bid too low: ${sell_price:.4f}"})
 
             sell_args = OrderArgs(
                 token_id=token_id,
