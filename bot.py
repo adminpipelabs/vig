@@ -255,7 +255,7 @@ def close_position(pos: dict, exit_type: str, exit_price: float):
     """Move a position to closed list with P&L calculated."""
     cost = pos.get("cost", 0)
     size = pos.get("size", 0)
-    no_cost = exit_type in ("expired", "cancelled")
+    no_cost = exit_type in ("expired", "cancelled", "lost")
     actual_cost = 0 if no_cost else cost
     revenue = round(size * exit_price, 2)
     pnl = round(revenue - actual_cost, 2)
@@ -402,6 +402,114 @@ def data_api_value():
     except Exception:
         pass
     return 0
+
+
+
+RECONCILE_INTERVAL = 120  # seconds between Data API reconciliation sweeps
+_last_reconcile = 0
+
+
+def reconcile_positions():
+    """
+    Check Data API for positions the bot lost track of.
+    Adopt untracked positions and redeem any redeemable ones.
+    """
+    global _last_reconcile
+    now = time.time()
+    if now - _last_reconcile < RECONCILE_INTERVAL:
+        return
+    _last_reconcile = now
+
+    api_pos = data_api_positions()
+    if not api_pos:
+        return
+
+    tracked_tokens = {p["token_id"] for p in bot_state["positions"]}
+    changed = False
+
+    for ap in api_pos:
+        token_id = ap.get("asset", "")
+        condition_id = ap.get("conditionId", "")
+        redeemable = ap.get("redeemable", False)
+        size = float(ap.get("size", 0))
+        outcome = ap.get("outcome", "")
+        title = ap.get("title", "")[:80]
+        cur_price = float(ap.get("curPrice", 0))
+        neg_risk = ap.get("negativeRisk", False)
+        market_slug = ap.get("slug", "")
+
+        # Redeem if flagged
+        if redeemable and condition_id:
+            log.info("RECONCILE: redeemable — %s %s (%.0f tok @ $%.2f)",
+                     title[:40], outcome, size, cur_price)
+            is_neg = neg_risk
+            if relay_client and _relayer_redeem(
+                    w3_instance.eth.contract(address=Web3.to_checksum_address(CTF_ADDRESS), abi=CTF_ABI),
+                    condition_id, neg_risk=is_neg, token_id=token_id, outcome_index=0):
+                log.info("RECONCILE: redeemed via relayer — %s", title[:40])
+            elif try_claim(w3_instance, account_instance,
+                          w3_instance.eth.contract(address=Web3.to_checksum_address(CTF_ADDRESS), abi=CTF_ABI),
+                          {"condition_id": condition_id, "question": title,
+                           "neg_risk": is_neg, "token_id": token_id}):
+                log.info("RECONCILE: redeemed direct — %s", title[:40])
+
+            # Check if position was tracked and mark done
+            if token_id in tracked_tokens:
+                for p in bot_state["positions"]:
+                    if p["token_id"] == token_id:
+                        p["status"] = "done"
+                        close_position(p, "won", 1.0)
+                        break
+                changed = True
+            else:
+                # Add to closed history
+                avg_price = float(ap.get("avgPrice", 0.25))
+                bot_state["closed_positions"].append({
+                    "question": title, "buy_price": avg_price,
+                    "exit_price": cur_price, "size": size,
+                    "cost": round(size * avg_price, 2),
+                    "revenue": round(size * cur_price, 2),
+                    "pnl": round(size * cur_price - size * avg_price, 2),
+                    "exit_type": "won" if cur_price >= 0.99 else "reconciled",
+                    "opened_at": "", "closed_at": datetime.now(timezone.utc).isoformat(),
+                    "token_id": token_id, "condition_id": condition_id,
+                    "market_id": "", "source": "data_api_reconcile",
+                })
+                save_closed(bot_state["closed_positions"])
+                changed = True
+            time.sleep(2)
+            continue
+
+        # Adopt untracked positions (place sell orders on them)
+        if token_id and token_id not in tracked_tokens and size > 0 and not redeemable:
+            avg_price = float(ap.get("avgPrice", 0.25))
+            log.info("RECONCILE: adopting %s %s — %.0f tok @ $%.2f (untracked)",
+                     title[:40], outcome, size, avg_price)
+            new_pos = {
+                "buy_order_id": "adopted",
+                "sell_order_id": None,
+                "market_id": "",
+                "question": f"{title} → {outcome}",
+                "token_id": token_id,
+                "condition_id": condition_id,
+                "buy_price": avg_price,
+                "sell_target": SELL_TARGET,
+                "size": int(size),
+                "cost": round(size * avg_price, 2),
+                "tick_size": 0.01,
+                "neg_risk": neg_risk,
+                "status": "held",
+                "placed_at": datetime.now(timezone.utc).isoformat(),
+                "source": "data_api_adopted",
+            }
+            bot_state["positions"].append(new_pos)
+            tracked_tokens.add(token_id)
+            changed = True
+
+    if changed:
+        bot_state["positions"] = [p for p in bot_state["positions"] if p["status"] != "done"]
+        save_positions(bot_state["positions"])
+        log.info("RECONCILE: now tracking %d positions", len(bot_state["positions"]))
 
 
 # ── Market Scanner ────────────────────────────────────────────────────────────
@@ -1213,6 +1321,9 @@ td{padding:8px;font-size:0.8rem;border-bottom:1px solid #0e0e18}
 .st.hold{background:#4a3520;color:#f59e0b}
 .st.sold{background:#1a3f2a;color:#22c55e}
 .st.claimed{background:#1a3f2a;color:#22c55e}
+.st.won{background:#1a3f2a;color:#22c55e}
+.st.lost{background:#3f1a1a;color:#ef4444}
+.st.reconciled{background:#1a2a3f;color:#60a5fa}
 .st.expired{background:#3f1a1a;color:#ef4444}
 .st.cancelled{background:#2a2a2a;color:#888}
 .pnl-pos{color:#22c55e;font-weight:600}
@@ -1259,10 +1370,9 @@ button:hover{background:#2563eb}button:disabled{opacity:.5;cursor:not-allowed}
 
   <div class="cards">
     <div class="card"><div class="l">USDC Balance</div><div class="v g" id="bal">--</div></div>
-    <div class="card"><div class="l">Open Bets</div><div class="v b" id="active">--</div></div>
-    <div class="card"><div class="l">Invested</div><div class="v" id="tspent">--</div></div>
-    <div class="card"><div class="l">Returned</div><div class="v g" id="treturned">--</div></div>
+    <div class="card"><div class="l">Live Positions</div><div class="v b" id="livepos">--</div></div>
     <div class="card"><div class="l">Portfolio Value</div><div class="v b" id="portval">--</div></div>
+    <div class="card"><div class="l">Returned</div><div class="v g" id="treturned">--</div></div>
     <div class="card"><div class="l">Net P&L</div><div class="v" id="pnl">--</div></div>
     <div class="card"><div class="l">Win Rate</div><div class="v y" id="winrate">--</div></div>
     <div class="card"><div class="l">W / L</div><div class="v" id="wl">--</div></div>
@@ -1335,8 +1445,9 @@ async function refresh(){
     document.getElementById('bal').textContent='$'+d.usdc_balance.toFixed(2);
     const pv=d.portfolio_value||0;
     document.getElementById('portval').textContent=pv?'$'+pv.toFixed(2):'--';
-    document.getElementById('active').textContent=d.active_positions+'/'+d.max_bets;
-    document.getElementById('tspent').textContent='$'+d.total_spent.toFixed(2);
+    
+    const oc=d.open_cost||0;
+    document.getElementById('livepos').textContent='$'+oc.toFixed(2)+' ('+d.active_positions+' bets)';
     document.getElementById('treturned').textContent='$'+d.total_returned.toFixed(2);
 
     const netPnl=d.net_pnl||0;
@@ -1932,6 +2043,14 @@ def run():
 
     threading.Thread(target=start_dashboard, daemon=True).start()
 
+    # Initial reconciliation — adopt any untracked positions
+    try:
+        reconcile_positions()
+        log.info("Initial reconciliation: %d positions, portfolio $%.2f",
+                 len(bot_state['positions']), data_api_value())
+    except Exception as e:
+        log.warning("Initial reconciliation failed: %s", e)
+
     tick_count = 0
     while True:
         try:
@@ -2015,7 +2134,7 @@ def run():
                         claimed = try_claim(w3, account, ctf, pos)
                         pos["status"] = "done"
                         exit_price = 1.0 if claimed else 0.0
-                        close_position(pos, "claimed" if claimed else "expired", exit_price)
+                        close_position(pos, "won" if claimed else "lost", exit_price)
 
             # 5. Remove done positions
             positions = [p for p in positions if p["status"] != "done"]
@@ -2046,6 +2165,12 @@ def run():
                     sweep_orphaned_tokens(w3, account, ctf)
                 except Exception as e:
                     log.debug("Token sweep failed: %s", e)
+
+            # 5d. Data API reconciliation — adopt untracked positions, redeem redeemable
+            try:
+                reconcile_positions()
+            except Exception as e:
+                log.debug("Reconciliation failed: %s", e)
 
             # 6. Fill empty slots — score a batch, buy the best
             slots = MAX_BETS - len(positions)
