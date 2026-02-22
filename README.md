@@ -1,39 +1,156 @@
-# Vig — Polymarket Rolling Bet Bot
+# Trading Bridge — Production Reference
 
-Automated prediction market bot. Buys YES tokens on favorites near expiry, claims resolved positions, redeploys capital.
+**Last updated: Feb 22, 2026**
 
-## How It Works
+## Server
 
-Every 60 seconds:
+| | Details |
+|---|---|
+| **Provider** | Hetzner, Helsinki (Finland) |
+| **Hostname** | ubuntu-4gb-hel1-1 |
+| **IP** | 46.62.211.255 |
+| **SSH** | `ssh root@46.62.211.255` |
+| **Why Finland** | Polymarket CLOB allows trading from Finland. No proxy needed. |
 
-1. **Claim** — Check active positions for resolution, redeem on-chain via CTF contract
-2. **Scan** — Query Gamma API for markets expiring within 60 min, priced $0.60–$0.80
-3. **Bet** — Fill empty slots (up to 10 simultaneous positions) with market orders
-4. **Repeat**
+> **Do NOT use the Ashburn server (5.161.64.209).** It is in the US which is geoblocked on Polymarket. Bots there are stopped.
 
-## Setup
+## Dashboards
 
-```bash
-pip install -r requirements.txt
-cp .env.example .env
-# Edit .env with your private key
-python bot.py
+| Bot | URL | Password |
+|-----|-----|----------|
+| Vig | http://46.62.211.255:8080 | API_SECRET from .env |
+| Scalper | http://46.62.211.255:8081 | API_SECRET from .env |
+
+## Bots — How They Run
+
+Both bots run as **Docker containers** on the Helsinki server.
+
+```
+docker ps                    # see running containers
+docker restart vig-bot       # restart Vig
+docker restart vig-scalper   # restart Scalper
+docker logs vig-bot --tail 50        # view Vig logs
+docker logs vig-scalper --tail 50    # view Scalper logs
 ```
 
-## Deploy (Railway)
+### File Locations (on Helsinki server)
 
-Push to GitHub — Railway auto-deploys. Set env vars in Railway dashboard:
-- `PRIVATE_KEY` — Polygon wallet key (onboarded on Polymarket)
-- `RPC_URL` — Polygon RPC endpoint
-- `MAX_BETS`, `BET_SIZE`, `MIN_PRICE`, `MAX_PRICE`, `EXPIRY_WINDOW`, `POLL_SECONDS`
+| Path | What |
+|------|------|
+| `/root/vig/bot.py` | Vig bot code (mounted read-only into Docker) |
+| `/root/vig/scalper.py` | Scalper bot code (mounted into Docker) |
+| `/root/vig/.env` | Environment variables (keys, config) |
+| `/root/vig/data/` | Vig data: positions.json, closed.json, trades.json |
+| `/root/vig/scalper_data/` | Scalper data: scalp_positions.json, etc. |
 
-## Config
+### GitHub Repo
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| MAX_BETS | 10 | Max simultaneous positions |
-| BET_SIZE | $10 | USDC per bet |
-| MIN_PRICE | $0.60 | Min YES price to enter |
-| MAX_PRICE | $0.80 | Max YES price to enter |
-| EXPIRY_WINDOW | 60 min | Only bet on markets expiring within this window |
-| POLL_SECONDS | 60s | Main loop interval |
+https://github.com/mikaelo/trading-bridge (branch: main)
+
+> **Note:** The Docker containers mount code from `/root/vig/`, NOT from the git repo at `/opt/trading-bridge/`. To update bot code, edit the files in `/root/vig/` and restart the Docker container.
+
+## Wallets
+
+| Bot | Address | Private Key |
+|-----|---------|-------------|
+| Vig | `0x989B7F2308924eA72109367467B8F8e4d5ea5A1D` | PRIVATE_KEY in `/root/vig/.env` |
+| Scalper | `0x4ae36dfA7CD02BB87334EDC35639f70981c02F54` | PRIVATE_KEY in scalper Docker env |
+
+Both wallets need **USDC on Polygon** to trade.
+
+## Vig Strategy
+
+Swing-trades on any Polymarket market that meets criteria.
+
+| Setting | Value |
+|---------|-------|
+| Buy range | $0.10 – $0.30 |
+| Sell target | $0.45 GTC |
+| Bet size | $5 |
+| Max spread | 5.0% |
+| Max expiry | 1 day (24 hours) |
+| Poll interval | 30 seconds |
+
+**Flow:** Scan markets → Buy at ask within range → Place GTC sell at $0.45 → Auto-redeem when market resolves → Reinvest USDC into new bets.
+
+## Scalper Strategy
+
+Trades crypto up/down markets at short intervals.
+
+| Setting | Value |
+|---------|-------|
+| 15-min | ETH + BTC, $0.40 GTC bid on Up AND Down |
+| 5-min | ETH, $0.40 GTC bid on Up AND Down, $2/side |
+| Poll interval | 15 seconds |
+
+**Flow:** Find next 15m/5m ETH market → Bid $0.40 on both Up and Down → Auto-redeem after market closes → Reinvest.
+
+## Auto-Redeem
+
+Both bots automatically:
+1. Detect when a market resolves
+2. Call `redeemPositions` on-chain to convert winning tokens → USDC
+3. Sweep orphaned tokens from old positions
+4. Use freed USDC to place new bets
+
+No manual intervention needed for redemption.
+
+## Security
+
+- All API endpoints require `API_SECRET` Bearer token
+- `/api/status`, `/api/sell`, `/api/withdraw`, `/api/reconcile` — all protected
+- Dashboard prompts for password on first visit
+- Ports 8080/8081 open to internet (consider firewall or HTTPS reverse proxy)
+
+## What Happened (Feb 21, 2026)
+
+1. Previous agent set up bots on Ashburn (US) server instead of Helsinki (Finland)
+2. API endpoints were left open without authentication
+3. Attacker found open endpoints, sold 14 positions, withdrew USDC
+4. Auth was added after the attack
+5. Bots migrated back to Helsinki server where they work without proxy
+
+## Quick Commands
+
+```bash
+# SSH into server
+ssh root@46.62.211.255
+
+# Check bot status
+docker ps
+
+# View Vig logs
+docker logs vig-bot --tail 100
+
+# View Scalper logs
+docker logs vig-scalper --tail 100
+
+# Restart after config change
+docker restart vig-bot
+docker restart vig-scalper
+
+# Check on-chain positions for Vig wallet
+curl -s "https://data-api.polymarket.com/positions?user=0x989b7f2308924ea72109367467b8f8e4d5ea5a1d" | python3 -m json.tool
+
+# Check on-chain positions for Scalper wallet
+curl -s "https://data-api.polymarket.com/positions?user=0x4ae36dfa7cd02bb87334edc35639f70981c02f54" | python3 -m json.tool
+```
+
+## Polymarket API Quick Reference
+
+| API | Base URL | Auth |
+|-----|----------|------|
+| Gamma (market discovery) | https://gamma-api.polymarket.com | None |
+| Data (positions, portfolio) | https://data-api.polymarket.com | None |
+| CLOB (trading) | https://clob.polymarket.com | API key (derived from wallet) |
+
+Key endpoints:
+- `GET /positions?user={wallet}` — on-chain positions
+- `GET /value?user={wallet}` — portfolio value
+- `GET /book?token_id={id}` — order book
+- `GET /midpoint?token_id={id}` — midpoint price
+
+On-chain contracts (Polygon):
+- CTF: `0x4D97DCd97eC945f40cF65F87097ACe5EA0476045`
+- NegRiskAdapter: `0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296`
+- USDC: `0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174`
