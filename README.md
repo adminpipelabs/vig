@@ -95,6 +95,46 @@ Both bots automatically:
 
 No manual intervention needed for redemption.
 
+## Market Maker Rewards
+
+Both bots earn rewards automatically — **no claiming or registration needed**. Polymarket distributes rewards daily at midnight UTC directly to the wallet addresses.
+
+### Two Programs
+
+| Program | Eligible Markets | How It Works | Payout |
+|---------|-----------------|--------------|--------|
+| **Liquidity Rewards** | All markets | Resting GTC limit orders on the book are scored every minute. Two-sided quoting and tighter spreads score exponentially higher. | Daily USDC at midnight UTC |
+| **Maker Rebates** | 5m + 15m crypto, NCAAB, Serie A | When your resting order gets filled by a taker, you earn a share of the taker fees (20% for crypto). | Daily USDC |
+
+### Current Status
+
+| Bot | Reward Eligibility | Notes |
+|-----|-------------------|-------|
+| **Scalper** | Fully eligible | GTC bids on both Up and Down = two-sided maker orders. Earns both Liquidity Rewards and Maker Rebates on 5m/15m crypto. |
+| **Vig** | Partially eligible | Buys use FAK first (taker, no rewards), then falls back to GTC. GTC sell orders do score. |
+
+### How Scoring Works
+
+Orders are scored using a quadratic formula: `S = ((v - s) / v)^2` where `v` is the max incentive spread and `s` is your distance from midpoint. Tighter to midpoint = exponentially more rewards. Two-sided liquidity (bids on both sides) gets a significant bonus.
+
+Each market defines `min_incentive_size` and `max_incentive_spread` — orders outside these bounds score zero. These can be fetched from the CLOB or Markets API.
+
+### Checking Rewards
+
+Rewards are paid directly to the bot wallets. Check USDC balance changes around midnight UTC, or query the Data API:
+
+```bash
+# Check Scalper wallet balance history
+curl -s "https://data-api.polymarket.com/value?user=0x4ae36dfa7cd02bb87334edc35639f70981c02f54" | python3 -m json.tool
+```
+
+### Potential Improvements
+
+1. **Vig bot**: Switch from FAK-first to GTC-only buys so all orders qualify as maker
+2. **Both bots**: Check `min_incentive_size` and `max_incentive_spread` per market before placing orders
+3. **Scalper**: Price bids relative to midpoint instead of fixed $0.40 for higher scoring
+4. **Docs**: https://docs.polymarket.com/market-makers/liquidity-rewards and https://docs.polymarket.com/market-makers/maker-rebates
+
 ## Security
 
 - All API endpoints require `API_SECRET` Bearer token
